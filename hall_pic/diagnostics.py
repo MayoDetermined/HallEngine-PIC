@@ -1,15 +1,12 @@
-"""Podgląd na żywo formowania wiązek RE (Matplotlib).
+"""Okno podglądu, w którym na żywo widać, jak rośnie wiązka elektronów.
 
-Sześć paneli, odświeżanych co plot_interval kroków:
-  1. Przestrzeń fazowa elektronów (x, v_x), kolor = energia [eV] — tu widać
-     "smugę" wiązki RE odrywającą się od tła.
-  2. Gęstości n_e, n_i(x) i profil pola B (oś pomocnicza).
-  3. Potencjał phi(x) i pole E_x(x).
-  4. Historia obwodu: I_d, I_L, V_C(t).
-  5. EEDF — rozkład energii elektronów (log-y) z zaznaczonym progiem E_RE.
-  6. Statystyki: liczba cząstek, udział APR, prąd RE.
-
-Tryb headless (cfg.headless_save_dir != "") zapisuje klatki PNG zamiast okna.
+Okno składa się z sześciu wykresów odświeżanych co pewną liczbę kroków. Widać
+na nich kolejno: rozkład elektronów w przestrzeni położeń i prędkości, gdzie
+wiązka odrywa się od tła jako osobna smuga; gęstości elektronów i jonów wraz z
+kształtem pola magnetycznego; potencjał i pole elektryczne; przebieg prądów i
+napięcia w obwodzie; rozkład energii elektronów z zaznaczonym progiem wiązki;
+oraz krótkie podsumowanie liczbowe. Jeśli zamiast okna podamy katalog, obrazki
+będą zapisywane do plików, co przydaje się przy pracy bez ekranu.
 """
 
 import os
@@ -20,7 +17,10 @@ from . import pusher
 
 
 class LiveView:
+    """Rysuje sześć wykresów podglądu albo zapisuje je jako kolejne obrazki."""
+
     def __init__(self, cfg):
+        """Zakłada okno z wykresami albo przygotowuje zapis klatek do plików."""
         self.cfg = cfg
         self.enabled = cfg.live_view or bool(cfg.headless_save_dir)
         if not self.enabled:
@@ -34,7 +34,7 @@ class LiveView:
         if cfg.live_view and not cfg.headless_save_dir:
             plt.ion()
         self.fig, self.axes = plt.subplots(2, 3, figsize=(16, 8))
-        self.fig.suptitle("PIC 1D3V — silnik Halla (SPT-100), formowanie wiązek RE")
+        self.fig.suptitle("PIC 1D3V - silnik Halla (SPT-100), formowanie wiązek RE")
         self._init_artists()
         self.hist_t = []
         self.hist_Id = []
@@ -43,6 +43,7 @@ class LiveView:
         self.hist_Ire = []
 
     def _init_artists(self):
+        """Nadaje wykresom tytuły i opisy osi oraz zakłada osie pomocnicze."""
         ax = self.axes
         for a in ax.ravel():
             a.grid(alpha=0.3)
@@ -58,13 +59,15 @@ class LiveView:
         ax[1, 1].set_xlabel("energia [eV]"); ax[1, 1].set_ylabel("liczność (log)")
         ax[1, 2].set_title("Statystyki")
         ax[1, 2].axis("off")
-        # osie pomocnicze (twin) tworzone RAZ i czyszczone co klatkę,
-        # inaczej narastałyby na sobie (wielokrotne etykiety / linie).
-        self.ax_B = ax[0, 1].twinx()     # pole B
-        self.ax_E = ax[0, 2].twinx()     # pole E_x
-        self.ax_V = ax[1, 0].twinx()     # napięcie V_C
+        # Osie pomocnicze zakładamy tylko raz i czyścimy przy każdej klatce.
+        # Gdybyśmy tworzyli je za każdym razem od nowa, nakładałyby się na
+        # siebie, mnożąc opisy i linie.
+        self.ax_B = ax[0, 1].twinx()     # dodatkowa oś na pole magnetyczne
+        self.ax_E = ax[0, 2].twinx()     # dodatkowa oś na pole elektryczne
+        self.ax_V = ax[1, 0].twinx()     # dodatkowa oś na napięcie anody
 
     def update(self, sim):
+        """Przerysowuje wszystkie wykresy na podstawie bieżącego stanu symulacji."""
         if not self.enabled:
             return
         cfg = self.cfg
@@ -74,7 +77,7 @@ class LiveView:
         ions = sim.ions
         mm = 1e3
 
-        # --- panel 1: przestrzeń fazowa ---
+        # Pierwszy wykres: elektrony w przestrzeni położeń i prędkości.
         a = ax[0, 0]; a.clear(); a.grid(alpha=0.3)
         a.set_title(f"Przestrzeń fazowa e⁻   t = {sim.t*1e9:.1f} ns")
         a.set_xlabel("x [mm]"); a.set_ylabel("v_x [10⁶ m/s]")
@@ -88,7 +91,7 @@ class LiveView:
                            vmin=0, vmax=max(cfg.E_RE_eV*4, 150), alpha=0.6)
             a.axhline(0, color="gray", lw=0.5)
 
-        # --- panel 2: gęstości + B ---
+        # Drugi wykres: gęstości obu gatunków i kształt pola magnetycznego.
         a = ax[0, 1]; a.clear(); a.grid(alpha=0.3)
         a.set_title("Gęstości i pole B"); a.set_xlabel("x [mm]"); a.set_ylabel("n [m⁻³]")
         ne = pusher.deposit_number_density(el, cfg)
@@ -100,7 +103,7 @@ class LiveView:
         a2.plot(cfg.x_nodes*mm, cfg.B_profile(cfg.x_nodes)*1e4, "g--", lw=1, alpha=0.6)
         a2.set_ylabel("B [G]", color="g")
 
-        # --- panel 3: potencjał + E ---
+        # Trzeci wykres: potencjał i pole elektryczne.
         a = ax[0, 2]; a.clear(); a.grid(alpha=0.3)
         a.set_title("Potencjał i pole E"); a.set_xlabel("x [mm]"); a.set_ylabel("φ [V]")
         a.plot(cfg.x_nodes*mm, sim.phi, "m-", lw=1.5, label="φ")
@@ -109,7 +112,7 @@ class LiveView:
         a3.plot(cfg.x_nodes*mm, sim.E/1e3, "c-", lw=1, alpha=0.6)
         a3.set_ylabel("E_x [kV/m]", color="c")
 
-        # --- panel 4: obwód ---
+        # Czwarty wykres: przebieg prądów i napięcia w obwodzie.
         a = ax[1, 0]; a.clear(); a.grid(alpha=0.3)
         a.set_title("Obwód RLC"); a.set_xlabel("t [ns]"); a.set_ylabel("I [A]")
         t_ns = np.array(self.hist_t)*1e9
@@ -121,7 +124,7 @@ class LiveView:
         a4.plot(t_ns, self.hist_VC, "k--", lw=1, alpha=0.6)
         a4.set_ylabel("V_C [V]")
 
-        # --- panel 5: EEDF ---
+        # Piąty wykres: rozkład energii elektronów z progiem wiązki.
         a = ax[1, 1]; a.clear(); a.grid(alpha=0.3)
         a.set_title("EEDF"); a.set_xlabel("energia [eV]"); a.set_ylabel("liczność (log)")
         if el.N > 0:
@@ -131,7 +134,7 @@ class LiveView:
             a.axvline(cfg.E_RE_eV, color="red", ls="--", label=f"E_RE={cfg.E_RE_eV:.0f} eV")
             a.legend(fontsize=8)
 
-        # --- panel 6: statystyki tekstowe ---
+        # Szósty wykres: samo podsumowanie liczbowe w formie tekstu.
         a = ax[1, 2]; a.clear(); a.axis("off")
         txt = sim.stats_text()
         a.text(0.02, 0.98, txt, va="top", ha="left", family="monospace",
@@ -146,6 +149,7 @@ class LiveView:
             plt.pause(0.001)
 
     def push_history(self, t, Id, IL, VC, Ire):
+        """Zapamiętuje kolejny punkt przebiegu obwodu do wykresu w czasie."""
         self.hist_t.append(t)
         self.hist_Id.append(Id)
         self.hist_IL.append(IL)
@@ -153,6 +157,7 @@ class LiveView:
         self.hist_Ire.append(Ire)
 
     def finalize(self):
+        """Na końcu przebiegu zostawia otwarte okno, o ile nie pracujemy bez ekranu."""
         if not self.enabled or self.cfg.headless_save_dir:
             return
         self.plt.ioff()

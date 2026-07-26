@@ -1,21 +1,17 @@
-"""Separowalny solver Poissona 2D dla obu geometrii silnika Halla.
+"""Wyznaczanie potencjału i pola elektrycznego na płaszczyźnie.
 
-    d²φ/dx1² + d²φ/dx2² = -ρ/ε0
+Zadanie jest takie samo jak w wersji jednowymiarowej, tylko na płaszczyźnie:
+mając rozkład ładunku, szukamy potencjału zgodnego z warunkami na brzegach.
+Wzdłuż osi kanału potencjał jest zadany na obu końcach: przy anodzie równy
+napięciu z obwodu, przy katodzie zerowy. W drugim kierunku zależy to od
+wybranej płaszczyzny. Kiedy kierunek zawija się w sobie, obowiązuje warunek
+okresowy, a kiedy ograniczają go ścianki, potencjał jest przy nich zerowy.
 
-Warunki brzegowe:
-  * x1 = z (osiowa): Dirichlet na obu końcach — φ(0,·)=V_anoda, φ(L1,·)=0.
-  * x2: zależnie od geometrii
-      - 'z-theta' : PERIODYCZNY (azymut)          -> transformata FFT
-      - 'z-r'     : Dirichlet (ścianki kanału)    -> transformata DST-I
-
-Metoda: transformujemy wzdłuż x2, co diagonalizuje drugą różnicę w tym
-kierunku (wartość własna λ_k). Dla każdej mody k zostaje układ trójdiagonalny
-wzdłuż z, rozwiązywany ZWEKTORYZOWANYM algorytmem Thomasa (pętla po ~N1,
-operacje wektorowe po wszystkich modach naraz). Czysty NumPy, bez scipy.
-
-Wartości własne drugiej różnicy wzdłuż x2:
-  periodyczny : λ_k = (2cos(2πk/N2) − 2)/h2²,  k = 0..N2−1
-  DST-I       : λ_k = (2cos(πk/N2)  − 2)/h2²,  k = 1..N2−1
+Sztuczka polega na tym, że drugi kierunek można rozłożyć na niezależne fale
+i policzyć każdą z nich osobno. Po takim rozłożeniu dla każdej fali zostaje
+proste zadanie wzdłuż osi kanału, które rozwiązujemy szybko i od razu dla
+wszystkich fal naraz. Całość korzysta wyłącznie z podstawowych operacji na
+tablicach.
 """
 
 import numpy as np
@@ -24,48 +20,54 @@ from hall_pic.constants import EPS0
 
 
 class Poisson2D:
+    """Liczy potencjał i pole na płaszczyźnie, dla obu układów kanału."""
+
     def __init__(self, cfg):
+        """Przygotowuje rozkład na fale w drugim kierunku i stałe zadania wzdłuż osi."""
         self.cfg = cfg
         self.periodic = (cfg.x2_bc == "periodic")
         self.N1 = cfg.N1
         self.N2 = cfg.N2
         self.h1 = cfg.h1
         self.h2 = cfg.h2
-        self.n1 = cfg.N1 - 1            # niewiadome wzdłuż z (węzły 1..N1-1)
+        self.n1 = cfg.N1 - 1            # tyle jest niewiadomych wzdłuż osi, bez dwóch brzegów
 
         if self.periodic:
-            self.nk = cfg.N2                       # wszystkie węzły są niewiadomymi
+            self.nk = cfg.N2                       # przy warunku okresowym niewiadome są wszystkie węzły
             k = np.arange(self.nk)
             self.lam = (2.0 * np.cos(2.0 * np.pi * k / self.N2) - 2.0) / self.h2**2
         else:
-            self.nk = cfg.N2 - 1                   # węzły wewnętrzne 1..N2-1
+            self.nk = cfg.N2 - 1                   # przy ściankach liczą się tylko węzły wewnętrzne
             k = np.arange(1, self.N2)
             self.lam = (2.0 * np.cos(np.pi * k / self.N2) - 2.0) / self.h2**2
-            # macierz DST-I: S[j-1,k-1] = sin(π j k / N2)
+            # Macierz zamieniająca wartości na fale i z powrotem, potrzebna, gdy
+            # drugi kierunek ograniczają ścianki.
             j = np.arange(1, self.N2)
             self.S = np.sin(np.pi * np.outer(j, k) / self.N2)
-            self.dst_scale = 2.0 / self.N2         # S @ (S @ f) = (N2/2) f
+            self.dst_scale = 2.0 / self.N2
 
-        # współczynniki trójdiagonalne wzdłuż z (a, c stałe; b zależy od mody)
+        # Stałe zadania wzdłuż osi. Skrajne współczynniki są jednakowe, a środkowy
+        # zależy od tego, którą falę akurat liczymy.
         self.a = 1.0 / self.h1**2
         self.c = 1.0 / self.h1**2
-        self.b = -2.0 / self.h1**2 + self.lam      # (nk,)
+        self.b = -2.0 / self.h1**2 + self.lam
 
-    # ---------------- transformaty wzdłuż x2 ----------------
+    # Zamiana między wartościami a falami w drugim kierunku.
     def _fwd(self, f):
-        """f: (n1, n2_nodes) -> (n1, nk) w przestrzeni mod."""
+        """Rozkłada dane w drugim kierunku na fale."""
         if self.periodic:
             return np.fft.fft(f, axis=1)
-        return f @ self.S                          # DST-I (bez skalowania)
+        return f @ self.S
 
     def _inv(self, F):
+        """Składa fale z powrotem w zwykłe wartości w drugim kierunku."""
         if self.periodic:
             return np.real(np.fft.ifft(F, axis=1))
         return (F @ self.S) * self.dst_scale
 
-    # ---------------- zwektoryzowany Thomas po modach ----------------
+    # Rozwiązanie zadania wzdłuż osi, od razu dla wszystkich fal.
     def _solve_tridiag(self, rhs):
-        """rhs: (n1, nk). Rozwiązuje niezależny układ trójdiagonalny dla każdej mody."""
+        """Rozwiązuje niezależne zadanie wzdłuż osi kanału dla każdej fali osobno."""
         n1 = self.n1
         a, c, b = self.a, self.c, self.b
         cp = np.empty((n1, self.nk), dtype=rhs.dtype)
@@ -82,30 +84,33 @@ class Poisson2D:
             x[i] = dp[i] - cp[i] * x[i + 1]
         return x
 
-    # ---------------- główne wywołanie ----------------
+    # Główne wywołanie.
     def solve(self, rho, V_anode):
-        """rho: (N1+1, n2_nodes) [C/m³]. Zwraca (phi, E1, E2) o tym samym kształcie."""
+        """Zwraca potencjał i obie składowe pola dla podanego rozkładu ładunku.
+
+        Napięcie anody podajemy z zewnątrz, bo narzuca je obwód.
+        """
         cfg = self.cfg
         n2n = cfg.n2_nodes
 
-        # --- prawa strona dla węzłów wewnętrznych wzdłuż z ---
-        src = -rho[1:self.N1] / EPS0                     # (n1, n2_nodes)
+        # Prawa strona dla węzłów wewnętrznych wzdłuż osi.
+        src = -rho[1:self.N1] / EPS0
         if not self.periodic:
-            src = src[:, 1:self.N2]                      # tylko węzły wewnętrzne x2
+            src = src[:, 1:self.N2]                      # przy ściankach bierzemy tylko wnętrze
 
         rhs = self._fwd(src)
 
-        # --- wkład warunków Dirichleta wzdłuż z (anoda / katoda) ---
-        # φ(0,·) = V_anode (stałe po x2), φ(L1,·) = 0
+        # Wkład od znanego potencjału na anodzie. Anoda ma to samo napięcie na
+        # całej szerokości, a katoda jest zerowa, więc nie dokłada nic.
         Va = np.full(n2n, float(V_anode))
         if not self.periodic:
             Va = Va[1:self.N2]
-        Va_hat = self._fwd(Va[None, :])[0]               # (nk,)
-        rhs[0] = rhs[0] - Va_hat / self.h1**2            # katoda = 0 -> brak członu
+        Va_hat = self._fwd(Va[None, :])[0]
+        rhs[0] = rhs[0] - Va_hat / self.h1**2
 
-        # --- rozwiązanie modowe + transformata odwrotna ---
+        # Rozwiązanie dla każdej fali, a potem złożenie fal z powrotem.
         phi_hat = self._solve_tridiag(rhs)
-        phi_int = self._inv(phi_hat)                     # (n1, nk_nodes)
+        phi_int = self._inv(phi_hat)
 
         phi = np.zeros((self.N1 + 1, n2n))
         phi[0, :] = V_anode
@@ -114,14 +119,18 @@ class Poisson2D:
             phi[1:self.N1, :] = phi_int
         else:
             phi[1:self.N1, 1:self.N2] = phi_int
-            phi[1:self.N1, 0] = 0.0                      # ścianki uziemione
+            phi[1:self.N1, 0] = 0.0                      # potencjał przy ściankach jest zerowy
             phi[1:self.N1, -1] = 0.0
 
         E1, E2 = self._gradient(phi)
         return phi, E1, E2
 
     def _gradient(self, phi):
-        """E = -∇φ. Różnice centralne; x2 periodyczne -> np.roll."""
+        """Liczy pole elektryczne z potencjału jako jego nachylenie ze znakiem minus.
+
+        W kierunku, który zawija się w sobie, sąsiada zza brzegu bierzemy z
+        drugiego końca.
+        """
         E1 = np.empty_like(phi)
         E1[1:-1, :] = -(phi[2:, :] - phi[:-2, :]) / (2.0 * self.h1)
         E1[0, :] = -(phi[1, :] - phi[0, :]) / self.h1

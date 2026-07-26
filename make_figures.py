@@ -1,17 +1,14 @@
-"""Dedykowane figury wynikowe symulacji 1D3V i 2D3V (bez benchmarków).
+"""Gotowe rysunki podsumowujące przebiegi, osobno dla obu wersji symulacji.
 
-    python make_figures.py                 # wszystkie trzy figury
-    python make_figures.py --only 1d       # tylko 1D3V
-    python make_figures.py --only 2d       # tylko obie geometrie 2D3V
+    python make_figures.py                 # wszystkie trzy rysunki
+    python make_figures.py --only 1d       # tylko wersja jednowymiarowa
+    python make_figures.py --only 2d       # tylko obie płaszczyzny wersji dwuwymiarowej
 
-Produkuje:
-    fig_1d3v.png             silnik Halla 1D3V (SPT-100), formowanie wiązki RE
-    fig_2d3v_zr.png          2D3V, płaszczyzna osiowo-promieniowa
-    fig_2d3v_ztheta.png      2D3V, płaszczyzna osiowo-azymutalna
-
-W odróżnieniu od podglądu na żywo te figury pokazują EWOLUCJĘ W CZASIE
-(przestrzeń fazowa i EEDF w kilku chwilach), bo formowanie wiązki RE jest
-procesem, a nie stanem.
+Powstają trzy pliki obrazów: jeden dla wersji jednowymiarowej i dwa dla wersji
+na płaszczyźnie, po jednym na każdą płaszczyznę kanału. W odróżnieniu od
+podglądu na żywo te rysunki pokazują, jak sytuacja zmienia się w czasie, bo
+wiązka nie powstaje od razu, tylko stopniowo się formuje. Dlatego rozkład
+elektronów i rozkład energii pokazujemy w kilku chwilach.
 """
 
 import argparse
@@ -33,10 +30,9 @@ from hall_pic.constants import E_CHARGE
 PS_CMAP = "inferno"
 
 
-# ======================================================================
-#  1D3V
-# ======================================================================
+# Wersja jednowymiarowa.
 def run_1d(n_steps=16000, n_snap=3):
+    """Przeprowadza przebieg jednowymiarowy i zbiera migawki oraz przebieg obwodu."""
     from hall_pic import Config, Simulation
     from hall_pic import pusher
 
@@ -73,13 +69,14 @@ def run_1d(n_steps=16000, n_snap=3):
 
 
 def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
+    """Składa sześciopanelowy rysunek podsumowujący przebieg jednowymiarowy."""
     fig, ax = plt.subplots(2, 3, figsize=(17, 9))
     fig.suptitle("PIC 1D3V  silnik Halla SPT-100: formowanie wiązki elektronów RE",
                  fontsize=14, weight="bold")
     mm = 1e3
     vmax = max(cfg.E_RE_eV * 4, 150)
 
-    # (a) przestrzeń fazowa  ostatnia chwila
+    # Panel pierwszy: rozkład elektronów w ostatniej chwili.
     s = snaps[-1]
     a = ax[0, 0]
     sc = a.scatter(s["x"] * mm, s["vx"] / 1e6, c=s["eps_s"], s=3, cmap=PS_CMAP,
@@ -89,7 +86,7 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a.set_xlabel("x [mm]"); a.set_ylabel("v_x [10⁶ m/s]"); a.grid(alpha=0.3)
     plt.colorbar(sc, ax=a, label="energia [eV]", fraction=0.046)
 
-    # (b) EEDF w kilku chwilach
+    # Panel drugi: rozkład energii w kilku chwilach.
     a = ax[0, 1]
     cols = plt.cm.viridis(np.linspace(0.15, 0.9, len(snaps)))
     hmax = 0.0
@@ -97,8 +94,9 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
         bins = np.linspace(0, max(np.percentile(sn["eps_all"], 99.5), 80), 45)
         h, e = np.histogram(sn["eps_all"], bins=bins, weights=sn["w_all"])
         h = h.astype(float)
-        # puste kosze -> NaN, żeby ich NIE rysować. Podłogowanie do ~0 na skali
-        # log dawało pionowe kolce na dno wykresu zamiast czytelnego ogona.
+        # Puste przedziały zamieniamy na wartość pustą, żeby ich nie rysować.
+        # Podciąganie ich do zera dawało na skali logarytmicznej pionowe kreski
+        # spadające na sam dół zamiast czytelnego ogona.
         h[h <= 0] = np.nan
         hmax = max(hmax, np.nanmax(h))
         a.semilogy(0.5 * (e[1:] + e[:-1]), h, color=cols[k], lw=1.7,
@@ -110,7 +108,7 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a.set_xlabel("energia [eV]"); a.set_ylabel("waga (log)")
     a.grid(alpha=0.3); a.legend(fontsize=8)
 
-    # (c) gęstości + B
+    # Panel trzeci: gęstości obu gatunków i kształt pola magnetycznego.
     a = ax[0, 2]
     a.plot(cfg.x_nodes * mm, ne, "b-", lw=1.3, label="n_e")
     a.plot(cfg.x_nodes * mm, ni, "r-", lw=1.3, label="n_i")
@@ -121,7 +119,7 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a2.plot(cfg.x_nodes * mm, cfg.B_profile(cfg.x_nodes) * 1e4, "g--", lw=1.4, alpha=0.7)
     a2.set_ylabel("B [G]", color="g"); a2.tick_params(axis="y", colors="g")
 
-    # (d) potencjał + E
+    # Panel czwarty: potencjał i pole elektryczne.
     a = ax[1, 0]
     a.plot(cfg.x_nodes * mm, sim.phi, "m-", lw=1.8)
     a.set_title("(d) Potencjał i pole elektryczne")
@@ -131,7 +129,7 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a3.plot(cfg.x_nodes * mm, sim.E / 1e3, "c-", lw=1.2, alpha=0.75)
     a3.set_ylabel("E_x [kV/m]", color="c"); a3.tick_params(axis="y", colors="c")
 
-    # (e) obwód RLC
+    # Panel piąty: przebieg prądów i napięcia w obwodzie.
     a = ax[1, 1]
     t_ns = hist[:, 0] * 1e9
     a.plot(t_ns, hist[:, 1], "b-", lw=1, alpha=0.8, label="I_d (wyładowanie)")
@@ -144,7 +142,7 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a4.plot(t_ns, hist[:, 3], "k--", lw=1.2, alpha=0.6)
     a4.set_ylabel("V_C [V]")
 
-    # (f) diagnostyka RE
+    # Panel szósty: liczba i energia rozpędzonych elektronów w czasie.
     a = ax[1, 2]
     a.plot(t_ns, hist[:, 5], color="darkorange", lw=1.6, label="liczba e⁻ RE")
     a.set_title("(f) Populacja RE i energia")
@@ -161,10 +159,9 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     print(f"   zapisano: {out}")
 
 
-# ======================================================================
-#  2D3V
-# ======================================================================
+# Wersja na płaszczyźnie.
 def run_2d(geometry, n_steps=4000):
+    """Przeprowadza przebieg na płaszczyźnie i zbiera migawki oraz przebieg obwodu."""
     from hall_pic2d import Config2D, Simulation2D
     from hall_pic2d import pusher2d
 
@@ -196,6 +193,7 @@ def run_2d(geometry, n_steps=4000):
 
 
 def fig_2d(cfg, sim, snaps, hist, ne, out):
+    """Składa sześciopanelowy rysunek podsumowujący przebieg na płaszczyźnie."""
     fig, ax = plt.subplots(2, 3, figsize=(17, 9))
     nice = "osiowo-promieniowa (z-r)" if cfg.geometry == "z-r" else "osiowo-azymutalna (z-θ)"
     fig.suptitle(f"PIC 2D3V  silnik Halla, płaszczyzna {nice}",
@@ -204,14 +202,14 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     extent = [0.0, cfg.L2 * mm, 0.0, cfg.L1 * mm]
     el = sim.electrons
 
-    # (a) mapa gęstości
+    # Panel pierwszy: mapa gęstości elektronów.
     a = ax[0, 0]
     im = a.imshow(ne, origin="lower", aspect="auto", extent=extent, cmap="viridis")
     a.set_title(f"(a) Gęstość elektronów   t = {sim.t*1e9:.1f} ns")
     a.set_xlabel(cfg.x2_label); a.set_ylabel("z [mm]")
     plt.colorbar(im, ax=a, label="n_e [m⁻³]", fraction=0.046)
 
-    # (b) mapa potencjału
+    # Panel drugi: mapa potencjału z liniami stałej wartości.
     a = ax[0, 1]
     im2 = a.imshow(sim.phi, origin="lower", aspect="auto", extent=extent, cmap="plasma")
     try:
@@ -224,7 +222,7 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     a.set_xlabel(cfg.x2_label); a.set_ylabel("z [mm]")
     plt.colorbar(im2, ax=a, label="φ [V]", fraction=0.046)
 
-    # (c) przestrzeń fazowa
+    # Panel trzeci: rozkład elektronów w przestrzeni położeń i prędkości.
     a = ax[0, 2]
     st = max(1, el.N // 6000)
     eps_s = el.kinetic_energy_eV()[::st]
@@ -235,7 +233,7 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     a.set_xlabel("z [mm]"); a.set_ylabel("v_z [10⁶ m/s]"); a.grid(alpha=0.3)
     plt.colorbar(sc, ax=a, label="energia [eV]", fraction=0.046)
 
-    # (d) EEDF w czasie
+    # Panel czwarty: rozkład energii w kilku chwilach.
     a = ax[1, 0]
     cols = plt.cm.viridis(np.linspace(0.15, 0.9, len(snaps)))
     hmax = 0.0
@@ -243,7 +241,7 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
         bins = np.linspace(0, max(np.percentile(sn["eps_all"], 99.5), 80), 60)
         h, e = np.histogram(sn["eps_all"], bins=bins, weights=sn["w_all"])
         h = h.astype(float)
-        h[h <= 0] = np.nan          # puste kosze nie są rysowane (patrz wersja 1D)
+        h[h <= 0] = np.nan          # puste przedziały pomijamy, tak jak w wersji jednowymiarowej
         hmax = max(hmax, np.nanmax(h))
         a.semilogy(0.5 * (e[1:] + e[:-1]), h, color=cols[k], lw=1.7,
                    label=f"t = {sn['t']*1e9:.1f} ns")
@@ -253,7 +251,7 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     a.set_xlabel("energia [eV]"); a.set_ylabel("waga (log)")
     a.grid(alpha=0.3); a.legend(fontsize=8)
 
-    # (e) obwód
+    # Panel piąty: przebieg prądów i napięcia w obwodzie.
     a = ax[1, 1]
     t_ns = hist[:, 0] * 1e9
     a.plot(t_ns, hist[:, 1], "b-", lw=1, alpha=0.8, label="I_d")
@@ -266,7 +264,7 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     a4.plot(t_ns, hist[:, 3], "k--", lw=1.2, alpha=0.6)
     a4.set_ylabel("V_C [V]")
 
-    # (f) RE + liczba cząstek (APR)
+    # Panel szósty: liczba rozpędzonych elektronów, energia i liczba czastek.
     a = ax[1, 2]
     a.plot(t_ns, hist[:, 5], color="darkorange", lw=1.6)
     a.set_title("(f) Populacja RE, energia i APR")
@@ -282,8 +280,8 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     print(f"   zapisano: {out}")
 
 
-# ======================================================================
 def main():
+    """Generuje wybrane rysunki podsumowujące, dla wersji jednowymiarowej lub na płaszczyźnie."""
     p = argparse.ArgumentParser()
     p.add_argument("--only", choices=["1d", "2d"], default=None)
     args = p.parse_args()

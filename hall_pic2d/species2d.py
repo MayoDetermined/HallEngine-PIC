@@ -1,7 +1,10 @@
-"""Kontener superczątstek 2D3V (Structure-of-Arrays).
+"""Pojemnik na czastki modelowe w wersji dwuwymiarowej.
 
-Położenie: (x1, x2). Prędkość: (v1, v2, v3) — trzecia składowa poza płaszczyzną.
-Waga w [1/m] — cząstki rzeczywiste na metr kierunku ignorowanego (patrz config2d).
+Czastka ma teraz dwie współrzędne położenia, bo porusza się po płaszczyźnie,
+oraz pełne trzy składowe prędkości, z których jedna wychodzi poza tę
+płaszczyznę. Wagę liczymy inaczej niż w wersji jednowymiarowej, bo pomijamy
+jeden z kierunków przestrzeni; szczegóły opisano przy konfiguracji. Poza tym
+pojemnik działa tak samo: dane w osobnych tablicach, rosnących w miarę potrzeb.
 """
 
 import numpy as np
@@ -10,7 +13,10 @@ from hall_pic.constants import E_CHARGE
 
 
 class Species2D:
+    """Zbiór czastek modelowych na płaszczyźnie, o wspólnym ładunku i masie."""
+
     def __init__(self, name, charge, mass, capacity=200000):
+        """Tworzy pusty gatunek o zadanym ładunku i masie pojedynczej czastki."""
         self.name = name
         self.charge = charge
         self.mass = mass
@@ -22,6 +28,7 @@ class Species2D:
     _FIELDS = ("x1", "x2", "v1", "v2", "v3", "w")
 
     def _ensure(self, extra):
+        """Upewnia się, że zmieści się jeszcze tyle nowych czastek, i w razie potrzeby powiększa tablice."""
         need = self.N + extra
         if need <= self._cap:
             return
@@ -34,6 +41,7 @@ class Species2D:
         self._cap = newcap
 
     def add(self, x1, x2, v1, v2, v3, w):
+        """Dopisuje nowe czastki na końcu. Argumenty mogą być tablicami lub liczbami."""
         x1 = np.atleast_1d(x1)
         n = x1.size
         if n == 0:
@@ -49,6 +57,7 @@ class Species2D:
         self.N += n
 
     def remove_mask(self, kill):
+        """Usuwa czastki zaznaczone w masce i upycha pozostałe od początku tablic."""
         if not np.any(kill):
             return
         idx = np.nonzero(~kill)[0]
@@ -58,22 +67,42 @@ class Species2D:
             arr[:m] = arr[idx]
         self.N = m
 
-    # widoki aktywnej części
+    # Poniższe własności zwracają widok samych aktywnych czastek, czyli
+    # początkowy wycinek każdej tablicy, bez kopiowania danych.
     @property
-    def ax1(self): return self.x1[:self.N]
+    def ax1(self):
+        """Położenia aktywnych czastek wzdłuż osi kanału."""
+        return self.x1[:self.N]
+
     @property
-    def ax2(self): return self.x2[:self.N]
+    def ax2(self):
+        """Położenia aktywnych czastek wzdłuż drugiego kierunku płaszczyzny."""
+        return self.x2[:self.N]
+
     @property
-    def av1(self): return self.v1[:self.N]
+    def av1(self):
+        """Prędkości aktywnych czastek wzdłuż osi kanału."""
+        return self.v1[:self.N]
+
     @property
-    def av2(self): return self.v2[:self.N]
+    def av2(self):
+        """Prędkości aktywnych czastek wzdłuż drugiego kierunku płaszczyzny."""
+        return self.v2[:self.N]
+
     @property
-    def av3(self): return self.v3[:self.N]
+    def av3(self):
+        """Prędkości aktywnych czastek w kierunku wychodzącym poza płaszczyznę."""
+        return self.v3[:self.N]
+
     @property
-    def aw(self):  return self.w[:self.N]
+    def aw(self):
+        """Wagi aktywnych czastek."""
+        return self.w[:self.N]
 
     def speed2(self):
+        """Kwadrat szybkości każdej aktywnej czastki, czyli suma kwadratów prędkości."""
         return self.av1**2 + self.av2**2 + self.av3**2
 
     def kinetic_energy_eV(self):
+        """Energia ruchu każdej aktywnej czastki, wyrażona w elektronowoltach."""
         return 0.5 * self.mass * self.speed2() / E_CHARGE

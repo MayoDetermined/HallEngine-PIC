@@ -1,19 +1,16 @@
-"""Klasa Simulation — pętla główna PIC 1D3V silnika Halla.
+"""Główna pętla symulacji, która spina ze sobą wszystkie części.
 
-Kolejność kroku (leapfrog / Boris):
-  1. Depozycja ładunku rho (CIC).
-  2. Poisson -> phi, E (BC: phi(0)=V_C z obwodu).
-  3. Zbieranie E do cząstek, pchacz Borisa (E_x, B_y) -> nowe v, x.
-  4. Warunki brzegowe: absorpcja anoda/katoda, akumulacja prądu wyładowania.
-  5. Emisja elektronów z katody (neutralizator).
-  6. Kolizje null-MCC (elektrony: elast./wzbudz./jonizacja; jony: CEX/elast.).
-  7. APR (co apr_interval): rozrzedzanie tła + zagęszczanie wiązki RE.
-  8. Aktualizacja obwodu RLC (RK4 z podkrokami) -> nowe V_C.
-  9. Diagnostyka na żywo (co plot_interval).
+Jeden krok w czasie przebiega zawsze tak samo. Najpierw rozkładamy ładunek
+czastek na siatkę i wyznaczamy z niego potencjał oraz pole, przy czym napięcie
+anody bierzemy z obwodu. Potem odczytujemy pole w miejscu każdej czastki i
+przesuwamy czastki. Następnie pochłaniamy te, które trafiły na elektrody, i z
+zebranego ładunku odczytujemy prąd wyładowania. Katoda dosyła świeże elektrony,
+rozgrywamy zderzenia z gazem, co pewien czas dzielimy i łączymy czastki, na
+koniec przesuwamy obwód i odświeżamy podgląd.
 
-Ważenie superczątstek: waga w [1/m^2] = n0*dx/n_ppc na starcie (spójna dla
-elektronów i jonów -> quasineutralność). Prąd wyładowania:
-  I_d = (Q_anoda_e + Q_anoda_i) * A_channel / dt   [A].
+Wagę czastek dobieramy na starcie tak samo dla elektronów i jonów, dzięki czemu
+plazma zaczyna od stanu obojętnego elektrycznie. Prąd wyładowania liczymy z
+ładunku, jaki w danym kroku trafił na anodę.
 """
 
 import numpy as np
@@ -28,17 +25,20 @@ from . import pusher, apr as apr_mod
 
 
 class Simulation:
+    """Prowadzi symulację krok po kroku, łącząc pola, czastki, zderzenia i obwód."""
+
     def __init__(self, cfg: Config):
+        """Przygotowuje pola, oba gatunki czastek, solver, obwód i plazmę startową."""
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg.seed)
         self.t = 0.0
         self.step = 0
 
-        # gatunki
+        # Dwa gatunki czastek: elektrony i jony ksenonu.
         self.electrons = Species("e", -E_CHARGE, M_ELECTRON, capacity=400000)
         self.ions = Species("Xe+", +E_CHARGE, cfg.m_ion, capacity=400000)
 
-        # waga referencyjna superczątstki [1/m^2]
+        # Wspólna waga wzorcowa czastki na starcie.
         self.w_ref = cfg.n0_plasma * cfg.dx / cfg.n_ppc
 
         self.poisson = PoissonSolver(cfg)
@@ -48,25 +48,30 @@ class Simulation:
         self.phi = np.zeros(cfg.n_nodes)
         self.E = np.zeros(cfg.n_nodes)
 
-        # akumulatory prądu (na krok)
+        # Wielkości liczone na bieżąco w każdym kroku.
         self.I_d = 0.0
         self.I_RE = 0.0
         self.n_split = 0
         self.n_merge = 0
         self.n_ionized = 0
-        # liczniki skumulowane (od startu symulacji)
+        # Liczniki zbierane od początku przebiegu.
         self.total_split = 0
         self.total_merge = 0
         self.total_ionized = 0
 
         self._seed_plasma()
 
-    # ---------------- inicjalizacja plazmy ----------------
+    # Rozstawienie plazmy początkowej.
     def _seed_plasma(self):
+        """Rozstawia plazmę startową: elektrony i jony w tych samych miejscach.
+
+        Dzięki wspólnym położeniom plazma zaczyna od stanu obojętnego
+        elektrycznie. Prędkości losujemy zgodnie z zadanymi temperaturami.
+        """
         cfg = self.cfg
         n_cell = cfg.n_ppc
         N = cfg.Nx * n_cell
-        # równomierne położenia w każdej komórce
+        # Czastki rozkładamy równomiernie wewnątrz każdej komórki.
         cell = np.repeat(np.arange(cfg.Nx), n_cell)
         xr = self.rng.random(N)
         x = (cell + xr) * cfg.dx
@@ -74,58 +79,64 @@ class Simulation:
         vth_e = np.sqrt(E_CHARGE * cfg.Te0_eV / M_ELECTRON)
         vth_i = np.sqrt(E_CHARGE * cfg.Ti0_eV / cfg.m_ion)
 
-        # elektrony
+        # Elektrony.
         vex = self.rng.normal(0, vth_e, N)
         vey = self.rng.normal(0, vth_e, N)
         vez = self.rng.normal(0, vth_e, N)
         self.electrons.add(x, vex, vey, vez, np.full(N, self.w_ref))
-        # jony (te same położenia -> quasineutralność startowa)
+        # Jony w tych samych miejscach, żeby plazma startowała jako obojętna.
         vix = self.rng.normal(0, vth_i, N)
         viy = self.rng.normal(0, vth_i, N)
         viz = self.rng.normal(0, vth_i, N)
         self.ions.add(x.copy(), vix, viy, viz, np.full(N, self.w_ref))
 
-    # ---------------- pojedynczy krok ----------------
+    # Pojedynczy krok w czasie.
     def step_once(self):
+        """Wykonuje jeden pełny krok symulacji w czasie."""
         cfg = self.cfg
-        # 1. depozycja
+        # Rozłożenie ładunku czastek na siatkę.
         rho = pusher.deposit_charge([self.electrons, self.ions], cfg)
-        # 2. Poisson (BC z obwodu)
+        # Potencjał i pole, z napięciem anody wziętym z obwodu.
         self.phi, self.E = self.poisson.solve(rho, self.circuit.V_C)
-        # 3. push
+        # Odczyt pola w miejscu czastek i ich przesunięcie.
         Ee = pusher.gather_field(self.electrons, self.E, cfg)
         Ei = pusher.gather_field(self.ions, self.E, cfg)
         pusher.boris_push(self.electrons, Ee, cfg)
         pusher.boris_push(self.ions, Ei, cfg)
-        # 4. brzegi + prąd wyładowania
+        # Pochłonięcie czastek na elektrodach i odczyt prądu wyładowania.
         qa_e, qc_e, _ = pusher.apply_boundaries(self.electrons, cfg)
         qa_i, qc_i, n_i_cath = pusher.apply_boundaries(self.ions, cfg)
-        # prąd przewodzenia na anodzie [A]; ładunek elektronu ujemny -> znak
-        Q_anode = qa_e + qa_i             # [C/m^2]
+        # Ładunek zebrany na anodzie zamieniamy na prąd. Znak wynika z tego,
+        # że ładunek elektronu jest ujemny.
+        Q_anode = qa_e + qa_i
         self.I_d = -Q_anode * cfg.A_channel / cfg.dt
-        # 5. emisja katody: kompensuje jony docierające do katody
+        # Katoda dosyła elektrony, mniej więcej tyle, ile jonów do niej dotarło.
         inj_w = cfg.cathode_gain * n_i_cath
         pusher.inject_cathode_electrons(self.electrons, self.w_ref, inj_w, cfg, self.rng)
-        # 6. kolizje
+        # Zderzenia z gazem.
         if cfg.enable_collisions:
             self.n_ionized = self.mcc.collide_electrons(self.electrons, self.ions, self.w_ref)
             self.mcc.collide_ions(self.ions, self.w_ref)
             self.total_ionized += self.n_ionized
-        # 7. APR
+        # Co pewien czas dzielimy i łączymy czastki.
         if cfg.enable_apr and (self.step % cfg.apr_interval == 0):
             self.n_split, self.n_merge = apr_mod.run_apr(self.electrons, cfg, self.w_ref, self.rng)
             self.total_split += self.n_split
             self.total_merge += self.n_merge
-        # 8. obwód
+        # Przesunięcie obwodu.
         self.circuit.advance(self.I_d, cfg.dt)
-        # prąd wiązki RE (elektrony > E_RE przekraczające płaszczyznę wylotu — miara)
+        # Miara prądu niesionego przez rozpędzone elektrony.
         self.I_RE = self._beam_current()
 
         self.t += cfg.dt
         self.step += 1
 
     def _beam_current(self):
-        """Szacunkowy prąd niesiony przez elektrony RE (energia > E_RE) [A]."""
+        """Szacuje prąd niesiony przez rozpędzone elektrony.
+
+        Bierzemy tylko elektrony powyżej progu i sumujemy ich udział w ruchu
+        ładunku wzdłuż osi.
+        """
         el = self.electrons
         if el.N == 0:
             return 0.0
@@ -133,12 +144,13 @@ class Simulation:
         mask = eps > self.cfg.E_RE_eV
         if not np.any(mask):
             return 0.0
-        # prąd = q * A * suma(w * v_x)/L  (średni transport ładunku RE)
+        # Średni przepływ ładunku niesiony przez rozpędzone elektrony.
         flux = np.sum(el.aw[mask] * el.avx[mask]) / self.cfg.L
         return abs(E_CHARGE * self.cfg.A_channel * flux)
 
-    # ---------------- diagnostyka pomocnicza ----------------
+    # Tekst do panelu diagnostycznego.
     def stats_text(self):
+        """Składa wielowierszowy opis bieżącego stanu do pokazania w podglądzie."""
         el = self.electrons
         eps = el.kinetic_energy_eV() if el.N > 0 else np.array([0.0])
         n_re = int(np.sum(eps > self.cfg.E_RE_eV)) if el.N > 0 else 0

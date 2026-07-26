@@ -1,11 +1,11 @@
-"""Punkt wejścia symulacji PIC 2D3V silnika Halla.
+"""Uruchamianie symulacji w wersji na płaszczyźnie.
 
-Przykłady:
-    python run2d.py                              # z-θ (osiowo-azymutalna), podgląd na żywo
-    python run2d.py --geometry z-r               # z-r (kanał ze ściankami)
+Przykłady wywołania:
+    python run2d.py                              # płaszczyzna wokół kanału, podgląd na żywo
+    python run2d.py --geometry z-r               # płaszczyzna w poprzek kanału, ze ściankami
     python run2d.py --geometry z-r --steps 2000  # krótki przebieg testowy
-    python run2d.py --headless out2d/            # bez okna, klatki PNG
-    python run2d.py --n1 96 --n2 48 --ppc 12     # lżejsza siatka (szybciej)
+    python run2d.py --headless out2d/            # bez okna, z zapisem klatek
+    python run2d.py --n1 96 --n2 48 --ppc 12     # rzadsza siatka, dla szybszego przebiegu
 """
 
 import argparse
@@ -23,6 +23,7 @@ from hall_pic2d.diagnostics2d import LiveView2D
 
 
 def parse_args():
+    """Czyta ustawienia podane w wierszu poleceń."""
     p = argparse.ArgumentParser(description="PIC 2D3V silnika Halla")
     p.add_argument("--geometry", choices=["z-theta", "z-r"], default="z-theta",
                    help="płaszczyzna symulacji")
@@ -41,6 +42,7 @@ def parse_args():
 
 
 def main():
+    """Składa konfigurację z podanych ustawień, uruchamia przebieg i podgląd."""
     args = parse_args()
     cfg = Config2D()
     cfg.geometry = args.geometry
@@ -61,7 +63,7 @@ def main():
     n_steps = args.steps if args.steps is not None else cfg.n_steps
 
     print("=" * 66)
-    print(f" PIC 2D3V — silnik Halla, geometria {cfg.geometry}")
+    print(f" PIC 2D3V - silnik Halla, geometria {cfg.geometry}")
     print("=" * 66)
     print(f" x1 = z      : {cfg.L1*1e3:.1f} mm, N1 = {cfg.N1}, h1 = {cfg.h1*1e6:.1f} um")
     print(f" x2          : {cfg.L2*1e3:.1f} mm, N2 = {cfg.N2}, h2 = {cfg.h2*1e6:.1f} um"

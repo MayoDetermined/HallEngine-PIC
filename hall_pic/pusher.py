@@ -1,10 +1,12 @@
-"""Operacje siatka<->cząstka: depozycja (CIC), zbieranie pola, pchacz Borisa,
-warunki brzegowe (absorpcja na anodzie/katodzie) i emisja z katody.
+"""Przenoszenie informacji między siatką a czastkami oraz ruch czastek.
 
-Model 1D3V: położenie tylko x, ale prędkość 3-składnikowa (vx, vy, vz).
-Pole elektryczne E = (Ex, 0, 0) wzdłuż osi; pole magnetyczne B = (0, By, 0)
-radialne. Kombinacja E_x i B_y daje dryf ExB w kierunku azymutalnym (z) —
-kluczowy dla fizyki silnika Halla i zamagnetyzowania elektronów.
+Tu mieszczą się wszystkie kroki, które łączą świat siatki ze światem czastek:
+rozkładanie ładunku czastek na węzły, odczytywanie pola w miejscu czastki,
+przesuwanie czastek pod wpływem pól, a także to, co dzieje się, gdy czastka
+dotrze do anody albo katody. Choć śledzimy tylko położenie wzdłuż osi kanału,
+prędkość ma pełne trzy składowe. Pole elektryczne działa wzdłuż osi, a pole
+magnetyczne jest skierowane w poprzek, i to właśnie ich złożenie nadaje
+elektronom charakterystyczny dryf typowy dla silnika Halla.
 """
 
 import numpy as np
@@ -13,7 +15,11 @@ from .constants import E_CHARGE
 
 
 def deposit_charge(species_list, cfg):
-    """Zwraca gęstość ładunku rho na węzłach [C/m^3] (CIC, 1. rząd)."""
+    """Rozkłada ładunek wszystkich czastek na węzły siatki.
+
+    Każda czastka dokłada się do dwóch najbliższych węzłów tym więcej, im bliżej
+    danego węzła leży. Zwraca gęstość ładunku na wszystkich węzłach.
+    """
     rho = np.zeros(cfg.n_nodes)
     dx = cfg.dx
     for sp in species_list:
@@ -24,18 +30,23 @@ def deposit_charge(species_list, cfg):
         i = np.floor(fi).astype(np.int64)
         i = np.clip(i, 0, cfg.Nx - 1)
         frac = fi - i
-        contrib = sp.charge * sp.aw / dx   # [C/m^3] * (bez dx bo dzielimy)
-        # rozkład na węzły i, i+1
+        contrib = sp.charge * sp.aw / dx
+        # Dokładamy udział do węzła po lewej i po prawej stronie czastki.
         np.add.at(rho, i, contrib * (1.0 - frac))
         np.add.at(rho, i + 1, contrib * frac)
-    # węzły brzegowe reprezentują pół komórki -> podwajamy gęstość na brzegu
+    # Węzły na samych brzegach obejmują tylko pół komórki, więc ich gęstość
+    # trzeba podwoić, żeby wyszła w tej samej skali co w środku.
     rho[0] *= 2.0
     rho[-1] *= 2.0
     return rho
 
 
 def deposit_number_density(sp, cfg):
-    """Gęstość liczbowa n(x) [1/m^3] pojedynczego gatunku (do diagnostyki)."""
+    """Rozkłada na węzły samą liczebność czastek jednego gatunku.
+
+    Działa tak samo jak rozkładanie ładunku, tylko bez mnożenia przez ładunek.
+    Przydaje się do podglądu gęstości elektronów albo jonów.
+    """
     n = np.zeros(cfg.n_nodes)
     if sp.N == 0:
         return n
@@ -52,7 +63,11 @@ def deposit_number_density(sp, cfg):
 
 
 def gather_field(sp, E_nodes, cfg):
-    """Interpoluje E_x z węzłów do położeń cząstek (CIC)."""
+    """Odczytuje pole elektryczne w miejscu każdej czastki.
+
+    Wartość między węzłami wyznaczamy jako średnią ważoną z dwóch sąsiednich
+    węzłów, tak samo jak przy rozkładaniu ładunku, tylko w drugą stronę.
+    """
     dx = cfg.dx
     fi = sp.ax / dx
     i = np.clip(np.floor(fi).astype(np.int64), 0, cfg.Nx - 1)
@@ -61,54 +76,55 @@ def gather_field(sp, E_nodes, cfg):
 
 
 def boris_push(sp, Ex_p, cfg):
-    """Pchacz Borisa 3V. Aktualizuje prędkość (E_x, B_y) i położenie x.
+    """Przesuwa czastki o jeden krok czasu pod wpływem pól.
 
-    B_y zależy od położenia cząstki (profil radialny). E działa tylko wzdłuż x.
+    Najpierw pole elektryczne rozpędza czastkę wzdłuż osi, potem pole
+    magnetyczne obraca jej prędkość, a na końcu pole elektryczne działa jeszcze
+    raz. Taki podział to sprawdzony sposób, który dobrze zachowuje energię.
+    Siła magnetyczna zależy od miejsca, bo pole jest silniejsze przy wylocie.
     """
     if sp.N == 0:
         return
     dt = cfg.dt
     qm = sp.charge / sp.mass
-    By = cfg.B_profile(sp.ax)          # indukcja w miejscu każdej cząstki
+    By = cfg.B_profile(sp.ax)          # natężenie pola tam, gdzie akurat jest czastka
 
-    # pół-przyspieszenie elektryczne (tylko x)
+    # Pierwsza połowa rozpędzania polem elektrycznym, tylko wzdłuż osi.
     vminus_x = sp.avx + qm * Ex_p * 0.5 * dt
     vminus_y = sp.avy.copy()
     vminus_z = sp.avz.copy()
 
-    # obrót magnetyczny wokół osi y: t = (0, ty, 0)
+    # Obrót prędkości wokół kierunku pola magnetycznego.
     ty = qm * By * 0.5 * dt
     s_fac = 2.0 * ty / (1.0 + ty * ty)
 
-    # v' = vminus + vminus x t   (t = (0,ty,0))
-    # (a x b) dla b=(0,ty,0): (az*ty? ) -> policzmy jawnie:
-    # v x t = (vy*tz - vz*ty, vz*tx - vx*tz, vx*ty - vy*tx), tx=tz=0
-    #       = (-vz*ty, 0, vx*ty)
+    # Pomocniczy krok obrotu: dokładamy do prędkości jej iloczyn wektorowy z
+    # wektorem obrotu. Pole leży wzdłuż jednego kierunku, więc zmieniają się
+    # tylko dwie składowe.
     vprime_x = vminus_x + (-vminus_z * ty)
     vprime_y = vminus_y
     vprime_z = vminus_z + (vminus_x * ty)
 
-    # vplus = vminus + vprime x s,  s = (0, sy, 0)
-    # vprime x s = (-vprime_z*sy, 0, vprime_x*sy)
+    # Dopełnienie obrotu drugim iloczynem wektorowym.
     vplus_x = vminus_x + (-vprime_z * s_fac)
     vplus_y = vminus_y
     vplus_z = vminus_z + (vprime_x * s_fac)
 
-    # druga połowa przyspieszenia elektrycznego
+    # Druga połowa rozpędzania polem elektrycznym.
     sp.vx[:sp.N] = vplus_x + qm * Ex_p * 0.5 * dt
     sp.vy[:sp.N] = vplus_y
     sp.vz[:sp.N] = vplus_z
 
-    # aktualizacja położenia (tylko x)
+    # Na koniec przesuwamy czastkę wzdłuż osi zgodnie z jej nową prędkością.
     sp.x[:sp.N] = sp.ax + sp.avx * dt
 
 
 def apply_boundaries(sp, cfg):
-    """Absorpcja na anodzie (x<0) i katodzie (x>L). Zwraca zebrany ładunek
-    [C/m^2] na anodzie i katodzie (dodatni = ilość ładunku danego gatunku).
+    """Pochłania czastki, które opuściły kanał przez anodę lub katodę.
 
-    Zwraca (q_anode, q_cathode, n_ion_to_cathode) gdzie ładunki są sumami
-    q_particle * w po zaabsorbowanych cząstkach.
+    Sumuje ładunek, który przy tym trafił na każdą z elektrod, i zwraca go
+    razem z liczbą jonów, które dobiły do katody. Te wielkości potrzebne są
+    później do zasilania obwodu i do dosyłania elektronów z katody.
     """
     if sp.N == 0:
         return 0.0, 0.0, 0.0
@@ -124,11 +140,11 @@ def apply_boundaries(sp, cfg):
 
 
 def inject_cathode_electrons(electrons, w_ref, n_inject_weight, cfg, rng):
-    """Wstrzykuje elektrony z płaszczyzny katody (x=L) do wnętrza.
+    """Dosyła świeże elektrony z katody w głąb kanału.
 
-    n_inject_weight — łączna waga [1/m^2] do wstrzyknięcia (np. proporcjonalna
-    do strumienia jonów uciekających do katody, * cathode_gain).
-    Rozkład prędkości: półmaxwellowski skierowany w -x (do wnętrza kanału).
+    Ile ich dosłać, mówi podana łączna waga, zwykle powiązana ze strumieniem
+    jonów uciekających do katody. Nowe elektrony startują tuż przy katodzie i
+    lecą do środka, z losowymi prędkościami o zadanej temperaturze.
     """
     if n_inject_weight <= 0.0:
         return
@@ -137,10 +153,10 @@ def inject_cathode_electrons(electrons, w_ref, n_inject_weight, cfg, rng):
         return
     from .constants import M_ELECTRON, K_BOLTZMANN
     vth = np.sqrt(E_CHARGE * cfg.Te_cathode_eV / M_ELECTRON)
-    # prędkości maxwellowskie, vx skierowane do wnętrza (ujemne)
+    # Prędkości losowe, przy czym wzdłuż osi zawsze skierowane w głąb kanału.
     vx = -np.abs(rng.normal(0.0, vth, n_new))
     vy = rng.normal(0.0, vth, n_new)
     vz = rng.normal(0.0, vth, n_new)
-    # tuż przy katodzie
+    # Startujemy tuż przy samej katodzie.
     x0 = cfg.L - 1e-6 - rng.random(n_new) * (cfg.dx * 0.5)
     electrons.add(x0, vx, vy, vz, np.full(n_new, w_ref))

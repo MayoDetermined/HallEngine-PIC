@@ -1,8 +1,9 @@
-"""Null-collision MCC dla 2D3V (neutrale zamrożone).
+"""Zderzenia czastek z gazem w wersji dwuwymiarowej.
 
-Fizyka identyczna jak w wersji 1D — zmienia się tylko to, że cząstka ma dwie
-współrzędne położenia, a gęstość neutrali zależy od położenia OSIOWEGO (z=x1).
-Po zderzeniu wektor prędkości jest losowo obracany (rozpraszanie izotropowe).
+Cała fizyka jest taka sama jak w wersji jednowymiarowej. Zmienia się tylko
+tyle, że czastka ma dwie współrzędne położenia, a gęstość gazu odczytujemy po
+położeniu wzdłuż osi kanału. Po każdym zderzeniu prędkość czastki obracamy w
+losowym kierunku.
 """
 
 import numpy as np
@@ -13,7 +14,10 @@ from hall_pic.collisions import isotropic_unit_vectors
 
 
 class NullCollisionMCC2D:
+    """Obsługuje zderzenia elektronów i jonów z gazem, na płaszczyźnie."""
+
     def __init__(self, cfg, rng):
+        """Wyznacza największe częstości zderzeń i szanse losowania dla obu gatunków."""
         self.cfg = cfg
         self.rng = rng
         eps = np.linspace(0.01, cfg.eps_max_grid_eV, cfg.n_energy_grid)
@@ -28,12 +32,18 @@ class NullCollisionMCC2D:
         self.P_i = 1.0 - np.exp(-self.nu_max_i * cfg.dt)
 
     def _set_iso(self, sp, gidx, speed, u1, u2, u3):
+        """Ustawia prędkość wskazanych czastek na nową długość i losowy kierunek."""
         sp.v1[gidx] = speed * u1
         sp.v2[gidx] = speed * u2
         sp.v3[gidx] = speed * u3
 
-    # ---------------- elektrony ----------------
+    # Zderzenia elektronów.
     def collide_electrons(self, electrons, ions):
+        """Rozgrywa zderzenia elektronów i zwraca, ile powstało przy tym nowych jonów.
+
+        Wylosowane elektrony mogą odbić się sprężyście, wzbudzić atom albo go
+        zjonizować. Jonizacja tworzy nową parę: dodatkowy elektron i jon.
+        """
         cfg, rng = self.cfg, self.rng
         N = electrons.N
         if N == 0 or self.P_e <= 0.0:
@@ -57,7 +67,7 @@ class NullCollisionMCC2D:
         is_el = r < p_el
         is_ex = (r >= p_el) & (r < p_el + p_ex)
         is_iz = (r >= p_el + p_ex) & (r < p_el + p_ex + p_iz)
-        # reszta -> zderzenie zerowe (nic się nie dzieje)
+        # Kto wylosował więcej niż suma szans, trafił na zderzenie zerowe i nic go nie zmienia.
 
         if np.any(is_el):
             sel = np.nonzero(is_el)[0]
@@ -99,8 +109,9 @@ class NullCollisionMCC2D:
             n_new = sel.size
         return n_new
 
-    # ---------------- jony ----------------
+    # Zderzenia jonów.
     def collide_ions(self, ions):
+        """Rozgrywa zderzenia jonów z atomami: wymianę ładunku i odbicia sprężyste."""
         cfg, rng = self.cfg, self.rng
         N = ions.N
         if N == 0 or self.P_i <= 0.0:
@@ -128,11 +139,11 @@ class NullCollisionMCC2D:
         is_cex = r < p_cex
         is_el = (r >= p_cex) & (r < p_cex + p_el)
 
-        if np.any(is_cex):          # jon przejmuje prędkość neutrala
+        if np.any(is_cex):          # przy wymianie ładunku jon przejmuje prędkość atomu
             s = np.nonzero(is_cex)[0]
             ions.v1[idx[s]] = n1[s]; ions.v2[idx[s]] = n2[s]; ions.v3[idx[s]] = n3[s]
 
-        if np.any(is_el):           # izotropowe w układzie środka masy (Xe~Xe)
+        if np.any(is_el):           # przy odbiciu sprężystym obracamy ruch względem wspólnego środka masy
             s = np.nonzero(is_el)[0]
             u1, u2, u3 = isotropic_unit_vectors(s.size, rng)
             gs = g[s]

@@ -1,14 +1,12 @@
-"""Pętla główna PIC 2D3V silnika Halla (geometria przełączalna z-θ / z-r).
+"""Główna pętla symulacji na płaszczyźnie, z możliwością wyboru płaszczyzny kanału.
 
-Kolejność kroku identyczna jak w 1D — zmienia się wymiarowość operacji siatkowych:
-  1. depozycja ρ (CIC dwuliniowa)
-  2. Poisson 2D -> φ, E1, E2   (BC osiowe: φ(0)=V_C z obwodu)
-  3. zbieranie (E1,E2) + pchacz Borisa z pełnym 3-wektorem B
-  4. brzegi (anoda/katoda; ścianki albo periodyczność) + prąd wyładowania
-  5. emisja z katody
-  6. null-MCC (neutrale zamrożone)
-  7. APR (co apr_interval)
-  8. obwód RLC
+Kolejność jednego kroku jest dokładnie taka sama jak w wersji jednowymiarowej,
+zmienia się tylko to, że operacje na siatce dzieją się na płaszczyźnie.
+Rozkładamy ładunek, liczymy potencjał i pole z napięciem anody wziętym z
+obwodu, przesuwamy czastki, pochłaniamy te na elektrodach i ściankach,
+odczytujemy prąd wyładowania, dosyłamy elektrony z katody, rozgrywamy
+zderzenia, co pewien czas dzielimy i łączymy czastki, na koniec przesuwamy
+obwód.
 """
 
 import numpy as np
@@ -23,7 +21,10 @@ from . import pusher2d, apr2d
 
 
 class Simulation2D:
+    """Prowadzi symulację na płaszczyźnie, łącząc pola, czastki, zderzenia i obwód."""
+
     def __init__(self, cfg: Config2D):
+        """Przygotowuje pola, oba gatunki czastek, solver, obwód i plazmę startową."""
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg.seed)
         self.t = 0.0
@@ -32,7 +33,7 @@ class Simulation2D:
         self.electrons = Species2D("e", -E_CHARGE, M_ELECTRON, capacity=400000)
         self.ions = Species2D("Xe+", +E_CHARGE, cfg.m_ion, capacity=400000)
 
-        # waga referencyjna [1/m]: n0 = w·n_ppc/(h1·h2)
+        # Wspólna waga wzorcowa czastki na starcie.
         self.w_ref = cfg.n0_plasma * cfg.h1 * cfg.h2 / cfg.n_ppc
 
         self.poisson = Poisson2D(cfg)
@@ -48,12 +49,17 @@ class Simulation2D:
         self.I_RE = 0.0
         self.n_split = self.n_merge = self.n_ionized = 0
         self.total_split = self.total_merge = self.total_ionized = 0
-        self.wall_loss_w = 0.0          # skumulowana waga utracona na ściankach (z-r)
+        self.wall_loss_w = 0.0          # łączna waga czastek utraconych na ściankach
 
         self._seed_plasma()
 
-    # ---------------- inicjalizacja ----------------
+    # Rozstawienie plazmy początkowej.
     def _seed_plasma(self):
+        """Rozstawia plazmę startową: elektrony i jony w tych samych miejscach.
+
+        Dzięki wspólnym położeniom plazma zaczyna od stanu obojętnego
+        elektrycznie. Prędkości losujemy zgodnie z zadanymi temperaturami.
+        """
         cfg = self.cfg
         N = cfg.n_cells * cfg.n_ppc
         rng = self.rng
@@ -74,11 +80,14 @@ class Simulation2D:
                       rng.normal(0, vth_i, N), rng.normal(0, vth_i, N),
                       rng.normal(0, vth_i, N), w.copy())
 
-    # ---------------- krok ----------------
+    # Pojedynczy krok w czasie.
     def step_once(self):
+        """Wykonuje jeden pełny krok symulacji w czasie."""
         cfg = self.cfg
-        # wagi CIC liczone RAZ na gatunek i reużywane przez depozycję i zbieranie
-        # (obie operacje działają na tych samych położeniach, przed pchaczem)
+        # Najbliższe węzły i udziały liczymy raz na gatunek i wykorzystujemy
+        # dwa razy: przy rozkładaniu ładunku i przy odczycie pola. Obie te
+        # operacje dzieją się przed przesunięciem czastek, więc położenia są
+        # jeszcze te same.
         cache = [pusher2d.cic_weights(self.electrons, cfg),
                  pusher2d.cic_weights(self.ions, cfg)]
         rho = pusher2d.deposit_charge([self.electrons, self.ions], cfg, cached=cache)
@@ -93,7 +102,8 @@ class Simulation2D:
         qa_i, _, w_cath_i, wall_i = pusher2d.apply_boundaries(self.ions, cfg)
         self.wall_loss_w += wall_e + wall_i
 
-        # prąd wyładowania: waga [1/m] × current_factor [m] -> cząstki rzeczywiste
+        # Ładunek zebrany na anodzie zamieniamy na prąd, przeskalowując liczony
+        # wycinek na cały obwód silnika.
         self.I_d = -(qa_e + qa_i) * cfg.current_factor / cfg.dt
 
         pusher2d.inject_cathode_electrons(
@@ -117,7 +127,7 @@ class Simulation2D:
         self.step += 1
 
     def _beam_current(self):
-        """Prąd niesiony przez elektrony RE (E > E_RE), transport osiowy."""
+        """Szacuje prąd niesiony wzdłuż osi przez rozpędzone elektrony."""
         el = self.electrons
         if el.N == 0:
             return 0.0
@@ -128,8 +138,9 @@ class Simulation2D:
         flux = np.sum(el.aw[m] * el.av1[m]) / self.cfg.L1
         return abs(E_CHARGE * self.cfg.current_factor * flux)
 
-    # ---------------- diagnostyka ----------------
+    # Tekst do panelu diagnostycznego.
     def stats_text(self):
+        """Składa wielowierszowy opis bieżącego stanu do pokazania w podglądzie."""
         cfg = self.cfg
         el = self.electrons
         eps = el.kinetic_energy_eV() if el.N > 0 else np.array([0.0])

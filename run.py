@@ -1,18 +1,19 @@
-"""Punkt wejścia symulacji PIC 1D3V silnika Halla.
+"""Uruchamianie symulacji w wersji jednowymiarowej.
 
-Przykłady:
-    python run.py                      # domyślnie: podgląd na żywo, 200 ns
-    python run.py --t-end 1e-6         # dociągnij do 1 mikrosekundy
-    python run.py --headless out/      # bez okna, zapis klatek PNG
-    python run.py --no-apr             # wyłącz APR (porównanie dokładności RE)
-    python run.py --steps 2000         # ogranicz liczbę kroków (szybki test)
+Przykłady wywołania:
+    python run.py                      # podgląd na żywo, przebieg do dwustu nanosekund
+    python run.py --t-end 1e-6         # dłuższy przebieg, aż do jednej mikrosekundy
+    python run.py --headless out/      # bez okna, z zapisem klatek do katalogu
+    python run.py --no-apr             # bez dzielenia i łączenia czastek
+    python run.py --steps 2000         # krótki przebieg testowy o zadanej liczbie kroków
 """
 
 import argparse
 import sys
 import time
 
-# konsola Windows bywa cp1250 — wymuś UTF-8 dla znaków Ω, µ, ⁻ itd.
+# Konsola na Windows bywa ustawiona na kodowanie, które nie zna polskich znaków
+# ani znaków jednostek. Prosimy więc o kodowanie, które je obsługuje.
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -24,6 +25,7 @@ from hall_pic.diagnostics import LiveView
 
 
 def parse_args():
+    """Czyta ustawienia podane w wierszu poleceń."""
     p = argparse.ArgumentParser(description="PIC 1D3V silnika Halla (SPT-100)")
     p.add_argument("--t-end", type=float, default=None, help="czas końcowy [s]")
     p.add_argument("--dt", type=float, default=None, help="krok czasowy [s]")
@@ -39,6 +41,7 @@ def parse_args():
 
 
 def main():
+    """Składa konfigurację z podanych ustawień, uruchamia przebieg i podgląd."""
     args = parse_args()
     cfg = Config()
     if args.t_end is not None: cfg.t_end = args.t_end
@@ -52,12 +55,12 @@ def main():
     if args.headless:
         cfg.headless_save_dir = args.headless
         cfg.live_view = False
-    cfg.__post_init__()  # przelicz wielkości pochodne po nadpisaniu
+    cfg.__post_init__()  # po nadpisaniu ustawień trzeba przeliczyć to, co z nich wynika
 
     n_steps = args.steps if args.steps is not None else cfg.n_steps
 
     print("=" * 60)
-    print(" PIC 1D3V — silnik Halla (SPT-100)")
+    print(" PIC 1D3V - silnik Halla (SPT-100)")
     print("=" * 60)
     print(f" Domena L         : {cfg.L*1e3:.1f} mm, Nx = {cfg.Nx}, dx = {cfg.dx*1e6:.2f} um")
     print(f" B_max            : {cfg.B_max*1e4:.0f} G @ x = {cfg.x_B*1e3:.1f} mm")
@@ -75,7 +78,7 @@ def main():
     t0 = time.time()
     for i in range(n_steps):
         sim.step_once()
-        # historia obwodu do wykresu (rzadziej, by nie puchła)
+        # Punkty do wykresu obwodu zbieramy rzadziej, żeby lista nie puchła.
         if sim.step % max(1, cfg.plot_interval // 5) == 0:
             view.push_history(sim.t, sim.I_d, sim.circuit.I_L, sim.circuit.V_C, sim.I_RE)
         if sim.step % cfg.plot_interval == 0:

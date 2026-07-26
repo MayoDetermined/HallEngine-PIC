@@ -1,20 +1,17 @@
-"""Monte Carlo Collisions metodą zderzeń zerowych (null-collision MCC).
+"""Zderzenia czastek z gazem, liczone metodą zderzeń zerowych.
 
-Neutrale ZAMROŻONE: stały profil gęstości n_n(x), rozkład prędkości neutrali
-maxwellowski o temperaturze T_neutral (używany dla jonów: CEX/elastyczne).
+Gaz jest zamrożony, to znaczy jego gęstość jest z góry ustalona i nie zmienia
+się w czasie, a prędkości atomów losujemy z rozkładu o zadanej temperaturze.
 
-Idea null-MCC:
-  1. Wyznacz nu_max = max_eps [ n_n * sigma_tot(eps) * v(eps) ] — stałe w czasie.
-  2. Prawdopodobieństwo, że dana cząstka W OGÓLE bierze udział w losowaniu:
-         P = 1 - exp(-nu_max * dt).
-     Losujemy tylko frakcję P wszystkich cząstek (tanie!).
-  3. Dla wylosowanej cząstki liczymy realne nu_i = n_n(x)*sigma_i(eps)*v.
-     Prawdopodobieństwa procesów: nu_i/nu_max; reszta do 1 = "zderzenie zerowe"
-     (nic się nie dzieje). To eliminuje kosztowne całkowanie po torze.
+Sztuczka z zderzeniami zerowymi pozwala uniknąć sprawdzania każdej czastki co
+krok. Najpierw ustalamy największą możliwą częstość zderzeń w całym zakresie
+energii. Z niej wynika, jaki ułamek czastek w ogóle bierze udział w losowaniu,
+więc losujemy tylko tę garstkę, co jest tanie. Dla każdej wylosowanej czastki
+liczymy dopiero prawdziwe szanse na poszczególne rodzaje zderzeń. Jeśli żadne
+nie wypadnie, mówimy, że zderzenie było zerowe, i nic się nie dzieje.
 
-Po zderzeniu WEKTOR PRĘDKOŚCI JEST LOSOWO OBRACANY (rozpraszanie izotropowe) —
-nowy kierunek próbkowany równomiernie na sferze, moduł z zachowania energii
-danego procesu.
+Po każdym zderzeniu obracamy prędkość czastki w losowym kierunku, a jej długość
+dobieramy zgodnie z tym, ile energii dane zderzenie zabiera.
 """
 
 import numpy as np
@@ -24,7 +21,7 @@ from . import cross_sections as xs
 
 
 def isotropic_unit_vectors(n, rng):
-    """n losowych wektorów jednostkowych, równomiernie na sferze."""
+    """Zwraca zadaną liczbę losowych kierunków rozłożonych równo we wszystkie strony."""
     cos_theta = 2.0 * rng.random(n) - 1.0
     sin_theta = np.sqrt(np.maximum(0.0, 1.0 - cos_theta**2))
     phi = 2.0 * np.pi * rng.random(n)
@@ -34,14 +31,19 @@ def isotropic_unit_vectors(n, rng):
 
 
 class NullCollisionMCC:
+    """Obsługuje zderzenia elektronów i jonów z gazem metodą zderzeń zerowych."""
+
     def __init__(self, cfg, rng):
+        """Zapamiętuje ustawienia i generator losowy oraz przygotowuje częstości."""
         self.cfg = cfg
         self.rng = rng
         self._prepare_electron()
         self._prepare_ion()
 
-    # --------- przygotowanie nu_max ---------
+    # Ustalenie największej możliwej częstości zderzeń i wynikającej z niej
+    # szansy, że dana czastka trafi do losowania.
     def _prepare_electron(self):
+        """Wyznacza dla elektronów największą częstość zderzeń i związaną z nią szansę losowania."""
         eps = np.linspace(0.01, self.cfg.eps_max_grid_eV, self.cfg.n_energy_grid)
         v = xs.speed_from_energy_e(eps)
         n_n_max = self.cfg.n_n_anode
@@ -50,6 +52,7 @@ class NullCollisionMCC:
         self.P_e = 1.0 - np.exp(-self.nu_max_e * self.cfg.dt)
 
     def _prepare_ion(self):
+        """Wyznacza dla jonów największą częstość zderzeń i związaną z nią szansę losowania."""
         eps = np.linspace(0.01, self.cfg.eps_max_grid_eV, self.cfg.n_energy_grid)
         v = np.sqrt(2.0 * eps * E_CHARGE / self.cfg.m_ion)
         n_n_max = self.cfg.n_n_anode
@@ -57,14 +60,19 @@ class NullCollisionMCC:
         self.nu_max_i = float(np.max(rate))
         self.P_i = 1.0 - np.exp(-self.nu_max_i * self.cfg.dt)
 
-    # --------- elektrony ---------
+    # Zderzenia elektronów.
     def collide_electrons(self, electrons, ions, w_ref):
+        """Rozgrywa zderzenia elektronów i zwraca, ile powstało przy tym nowych jonów.
+
+        Wylosowane elektrony mogą odbić się sprężyście, wzbudzić atom albo go
+        zjonizować. Jonizacja tworzy nową parę: dodatkowy elektron i jon.
+        """
         cfg = self.cfg
         N = electrons.N
         if N == 0 or self.P_e <= 0.0:
             return 0
         rng = self.rng
-        # losowy podzbiór kandydatów (null-collision)
+        # Wybieramy losowo tę część elektronów, która bierze udział w losowaniu.
         n_cand = rng.binomial(N, self.P_e)
         if n_cand == 0:
             return 0
@@ -88,20 +96,21 @@ class NullCollisionMCC:
         is_el = r < c1
         is_ex = (r >= c1) & (r < c2)
         is_iz = (r >= c2) & (r < c3)
-        # r >= c3  -> zderzenie zerowe (bez zmian)
+        # Kto wylosował więcej niż suma szans, trafił na zderzenie zerowe i nic go nie zmienia.
 
         n_ion = 0
-        # --- elastyczne: energia ~zachowana (mały transfer do ciężkiego Xe) ---
+        # Zderzenie sprężyste: energia niemal się nie zmienia, bo atom jest
+        # o wiele cięższy, ale kierunek prędkości ustawiamy losowo.
         if np.any(is_el):
             sel = np.nonzero(is_el)[0]
             dvx, dvy, dvz = isotropic_unit_vectors(sel.size, rng)
-            # niewielka strata energii 2 m/M
+            # Elektron oddaje atomowi tylko drobny ułamek energii.
             dE_frac = 2.0 * M_ELECTRON / cfg.m_ion
             new_eps = np.maximum(eps[sel] * (1.0 - dE_frac), 1e-3)
             new_speed = xs.speed_from_energy_e(new_eps)
             self._set_iso(electrons, idx[sel], new_speed, dvx, dvy, dvz)
 
-        # --- wzbudzenie: strata progu wzbudzenia ---
+        # Wzbudzenie: elektron oddaje energię progu wzbudzenia i leci dalej w losowym kierunku.
         if np.any(is_ex):
             sel = np.nonzero(is_ex)[0]
             new_eps = np.maximum(eps[sel] - xs.E_EXC_XE, 1e-3)
@@ -109,29 +118,30 @@ class NullCollisionMCC:
             dvx, dvy, dvz = isotropic_unit_vectors(sel.size, rng)
             self._set_iso(electrons, idx[sel], new_speed, dvx, dvy, dvz)
 
-        # --- jonizacja: tworzy parę elektron-jon ---
+        # Jonizacja: z jednego elektronu robią się dwa, a w kanale przybywa jon.
         if np.any(is_iz):
             sel = np.nonzero(is_iz)[0]
             gi = idx[sel]
             avail = np.maximum(eps[sel] - xs.E_ION_XE, 0.0)
-            # podział energii między elektron pierwotny a wtórny
+            # Energię, która zostaje po pokryciu progu, dzielimy losowo między
+            # elektron pierwotny i wybity.
             split = rng.random(sel.size)
             e_prim = avail * split
             e_sec = avail * (1.0 - split)
 
-            # elektron pierwotny — nowy izotropowy kierunek
+            # Elektron pierwotny leci dalej w nowym, losowym kierunku.
             sp1 = xs.speed_from_energy_e(np.maximum(e_prim, 1e-3))
             d1 = isotropic_unit_vectors(sel.size, rng)
             self._set_iso(electrons, gi, sp1, *d1)
 
-            # elektron wtórny — nowa superczątstka (waga = waga rodzica)
+            # Elektron wybity to nowa czastka o tej samej wadze co rodzic.
             wpar = electrons.w[gi]
             sp2 = xs.speed_from_energy_e(np.maximum(e_sec, 1e-3))
             d2 = isotropic_unit_vectors(sel.size, rng)
             xpos = electrons.x[gi]
             electrons.add(xpos, sp2*d2[0], sp2*d2[1], sp2*d2[2], wpar)
 
-            # jon powstały w miejscu jonizacji — prędkość termiczna neutrali
+            # Powstały jon startuje z miejsca jonizacji z prędkością termiczną gazu.
             vth_i = np.sqrt(K_BOLTZMANN * cfg.T_neutral / cfg.m_ion)
             ivx = rng.normal(0.0, vth_i, sel.size)
             ivy = rng.normal(0.0, vth_i, sel.size)
@@ -142,12 +152,14 @@ class NullCollisionMCC:
         return n_ion
 
     def _set_iso(self, sp, gidx, new_speed, ux, uy, uz):
+        """Ustawia prędkość wskazanych czastek na nową długość i losowy kierunek."""
         sp.vx[gidx] = new_speed * ux
         sp.vy[gidx] = new_speed * uy
         sp.vz[gidx] = new_speed * uz
 
-    # --------- jony (CEX + elastyczne z zamrożonymi neutralami) ---------
+    # Zderzenia jonów z zamrożonym gazem.
     def collide_ions(self, ions, w_ref):
+        """Rozgrywa zderzenia jonów z atomami: wymianę ładunku i odbicia sprężyste."""
         cfg = self.cfg
         N = ions.N
         if N == 0 or self.P_i <= 0.0:
@@ -159,12 +171,12 @@ class NullCollisionMCC:
         idx = rng.choice(N, size=n_cand, replace=False)
         vx = ions.vx[idx]; vy = ions.vy[idx]; vz = ions.vz[idx]
 
-        # prędkość neutrala (zamrożony gaz -> maxwellian termiczny)
+        # Losujemy prędkość atomu, z którym jon się spotyka.
         vth_n = np.sqrt(K_BOLTZMANN * cfg.T_neutral / cfg.m_ion)
         nvx = rng.normal(0.0, vth_n, n_cand)
         nvy = rng.normal(0.0, vth_n, n_cand)
         nvz = rng.normal(0.0, vth_n, n_cand)
-        # prędkość względna
+        # Liczy się prędkość jonu względem tego atomu.
         gx = vx - nvx; gy = vy - nvy; gz = vz - nvz
         g = np.sqrt(gx*gx + gy*gy + gz*gz)
         eps_rel = 0.5 * cfg.m_ion * g**2 / E_CHARGE
@@ -178,19 +190,20 @@ class NullCollisionMCC:
         is_cex = r < nu_cex
         is_el = (r >= nu_cex) & (r < nu_cex + nu_el)
 
-        # CEX: jon przejmuje prędkość neutrala (staje się "zimny")
+        # Przy wymianie ładunku jon przejmuje prędkość atomu, czyli praktycznie stygnie.
         if np.any(is_cex):
             sel = np.nonzero(is_cex)[0]
             ions.vx[idx[sel]] = nvx[sel]
             ions.vy[idx[sel]] = nvy[sel]
             ions.vz[idx[sel]] = nvz[sel]
 
-        # elastyczne: izotropowe rozproszenie w układzie środka masy (Xe~Xe)
+        # Przy odbiciu sprężystym jon i atom mają równe masy, więc obracamy
+        # ich ruch względny w losowym kierunku wokół wspólnego środka masy.
         if np.any(is_el):
             sel = np.nonzero(is_el)[0]
             ux, uy, uz = isotropic_unit_vectors(sel.size, rng)
             gsel = g[sel]
-            # środek masy (masy równe) -> v_cm = (v_ion + v_n)/2
+            # Prędkość środka masy to średnia prędkości jonu i atomu.
             cmx = 0.5*(vx[sel] + nvx[sel]); cmy = 0.5*(vy[sel] + nvy[sel]); cmz = 0.5*(vz[sel] + nvz[sel])
             ions.vx[idx[sel]] = cmx + 0.5*gsel*ux
             ions.vy[idx[sel]] = cmy + 0.5*gsel*uy

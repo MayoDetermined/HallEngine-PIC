@@ -1,11 +1,11 @@
-"""Rozwiązanie równania Poissona 1D (elektrostatyka) z warunkami Dirichleta.
+"""Wyznaczanie potencjału i pola elektrycznego wzdłuż kanału.
 
-    d^2 phi / dx^2 = -rho / eps0
-    phi(x=0)  = V_anode   (napięcie na kondensatorze obwodu, dynamiczne)
-    phi(x=L)  = 0         (katoda / masa)
-
-Solver trójdiagonalny (Thomas). Macierz jest stała, więc rozkładamy ją raz.
-Pole E = -d phi/dx liczone różnicami centralnymi na węzłach.
+Mając rozkład ładunku, szukamy potencjału tak, by na anodzie był on równy
+napięciu narzuconemu przez obwód, a na katodzie równy zeru. Zagadnienie
+sprowadza się do prostego układu równań na wewnętrznych węzłach siatki.
+Ponieważ jego macierz nie zmienia się w czasie, odwracamy ją raz na początku,
+a potem każdy krok to już tylko jedno mnożenie. Pole elektryczne dostajemy
+z potencjału zwykłą różnicą sąsiednich węzłów.
 """
 
 import numpy as np
@@ -14,28 +14,40 @@ from .constants import EPS0
 
 
 class PoissonSolver:
+    """Liczy potencjał i pole elektryczne na siatce kanału.
+
+    Macierz układu przygotowujemy i odwracamy jednorazowo w konstruktorze,
+    dzięki czemu pojedyncze wywołanie jest bardzo szybkie.
+    """
+
     def __init__(self, cfg):
+        """Buduje macierz układu dla węzłów wewnętrznych i od razu ją odwraca."""
         self.cfg = cfg
         self.Nx = cfg.Nx
         self.dx = cfg.dx
-        n_int = self.Nx - 1          # liczba węzłów wewnętrznych (1..Nx-1)
+        n_int = self.Nx - 1          # tyle jest węzłów w środku kanału, bez dwóch brzegowych
         self.n_int = n_int
-        # Macierz operatora dla węzłów wewnętrznych (stała w czasie):
-        #   (-phi_{i-1} + 2 phi_i - phi_{i+1}) = rho_i*dx^2/eps0 (+ BC)
+        # Macierz łączy każdy węzeł z dwoma sąsiadami i nie zależy od czasu,
+        # więc możemy ją zbudować raz na zawsze.
         M = (np.diag(2.0 * np.ones(n_int))
              + np.diag(-1.0 * np.ones(n_int - 1), 1)
              + np.diag(-1.0 * np.ones(n_int - 1), -1))
-        # Prekomputowana odwrotność -> solve = jeden matvec BLAS (szybkie).
+        # Odwracamy ją tu, żeby później każde rozwiązanie było jednym mnożeniem.
         self.Minv = np.linalg.inv(M)
 
     def solve(self, rho, V_anode):
-        """rho: gęstość ładunku na węzłach [C/m^3] (len Nx+1). Zwraca phi, E (len Nx+1)."""
+        """Zwraca potencjał i pole elektryczne dla podanego rozkładu ładunku.
+
+        Napięcie anody podajemy z zewnątrz, bo narzuca je obwód. Wynik obejmuje
+        wszystkie węzły, łącznie z brzegowymi.
+        """
         dx2 = self.dx * self.dx
-        # prawa strona: rho_i * dx^2 / eps0, z korektą brzegów Dirichleta
+        # Prawa strona układu. Do pierwszego i ostatniego równania trzeba
+        # dołożyć wkład od znanych wartości na brzegach.
         d = rho[1:self.Nx] * dx2 / EPS0
         d = d.astype(float).copy()
-        d[0] += V_anode      # phi_0 = V_anode przeniesione na prawą stronę
-        d[-1] += 0.0         # phi_Nx = 0
+        d[0] += V_anode      # na anodzie potencjał jest znany, przenosimy go na prawą stronę
+        d[-1] += 0.0         # na katodzie potencjał jest zerowy
 
         phi_int = self.Minv @ d
 
@@ -44,7 +56,8 @@ class PoissonSolver:
         phi[-1] = 0.0
         phi[1:self.Nx] = phi_int
 
-        # E = -dphi/dx (centralne w środku, jednostronne na brzegach)
+        # Pole to nachylenie potencjału ze znakiem minus. W środku bierzemy
+        # różnicę obu sąsiadów, a na samych brzegach różnicę jednostronną.
         E = np.empty_like(phi)
         E[1:-1] = -(phi[2:] - phi[:-2]) / (2.0 * self.dx)
         E[0] = -(phi[1] - phi[0]) / self.dx
