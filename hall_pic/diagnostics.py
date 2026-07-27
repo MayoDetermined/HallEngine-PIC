@@ -129,8 +129,13 @@ class LiveView:
         a.set_title("EEDF"); a.set_xlabel("energia [eV]"); a.set_ylabel("liczność (log)")
         if el.N > 0:
             eps_all = el.kinetic_energy_eV()
-            a.hist(eps_all, bins=80, weights=el.aw, log=True,
+            # Zakres osi ustawiamy jawnie, od zera do najwyższej energii,
+            # tak by prawy kraniec histogramu pokrywał się z odczytem najwyższej
+            # energii, a próg wiązki zawsze mieścił się w widoku.
+            e_top = max(float(eps_all.max()), cfg.E_RE_eV * 1.5)
+            a.hist(eps_all, bins=80, range=(0.0, e_top), weights=el.aw, log=True,
                    color="steelblue", alpha=0.8)
+            a.set_xlim(0.0, e_top)
             a.axvline(cfg.E_RE_eV, color="red", ls="--", label=f"E_RE={cfg.E_RE_eV:.0f} eV")
             a.legend(fontsize=8)
 
@@ -138,7 +143,7 @@ class LiveView:
         a = ax[1, 2]; a.clear(); a.axis("off")
         txt = sim.stats_text()
         a.text(0.02, 0.98, txt, va="top", ha="left", family="monospace",
-               fontsize=10, transform=a.transAxes)
+               fontsize=8, transform=a.transAxes)
 
         if cfg.headless_save_dir:
             fn = os.path.join(cfg.headless_save_dir, f"frame_{sim.step:06d}.png")

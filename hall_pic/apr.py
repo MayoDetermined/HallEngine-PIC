@@ -4,14 +4,16 @@ Wiązka rozpędzonych elektronów to niewielka mniejszość, więc łatwo o nią
 statystycznie zubożeć. Dlatego tam, gdzie taka wiązka się tworzy, dzielimy
 czastki na drobniejsze, żeby było ich więcej i żeby obraz był gładszy. Z kolei
 w spokojnym tle, gdzie czastek robi się za dużo, łączymy je z powrotem, żeby
-obliczenia nie spowalniały. Dzielenie zachowuje masę, pęd i energię, więc nie
-zaburza fizyki, a jedynie poprawia dokładność. Łączenia nie schodzimy poniżej
-pewnej najmniejszej wagi, żeby liczba czastek nie rosła bez opamiętania.
+obliczenia nie spowalniały. Zarówno dzielenie, jak i łączenie zachowuje masę,
+pęd oraz energię, więc nie zaburza fizyki, a jedynie zmienia liczbę czastek.
+Łączenia nie schodzimy poniżej pewnej najmniejszej wagi, żeby liczba czastek
+nie rosła bez opamiętania.
 """
 
 import numpy as np
 
 from .constants import E_CHARGE
+from .collisions import isotropic_unit_vectors
 
 
 def _cell_index(x, cfg):
@@ -28,21 +30,16 @@ def flag_beam_cells(electrons, cfg):
     """
     frac = np.zeros(cfg.Nx)
     counts = np.zeros(cfg.Nx)
-    
     if electrons.N == 0:
         return frac.astype(bool), frac
-    
     ci = _cell_index(electrons.ax, cfg)
     eps = electrons.kinetic_energy_eV()
     w = electrons.aw
-
     tot_w = np.zeros(cfg.Nx)
     re_w = np.zeros(cfg.Nx)
-
     np.add.at(tot_w, ci, w)
     np.add.at(re_w, ci, w * (eps > cfg.E_RE_eV))
     np.add.at(counts, ci, 1.0)
-    
     with np.errstate(divide="ignore", invalid="ignore"):
         frac = np.where(tot_w > 0, re_w / tot_w, 0.0)
     flags = (frac >= cfg.apr_beam_frac_threshold) & (counts > 0)
@@ -105,60 +102,77 @@ def refine_split(electrons, cfg, w_ref, rng):
 
 
 def coarsen_merge(electrons, cfg, rng):
-    """Łączy pary elektronów w spokojnych komórkach, gdzie jest ich za dużo.
+    """Łączy czwórki elektronów w pary, nie tracąc masy, pędu ani energii.
 
-    Łączymy tylko poza wiązką i tylko czastki o zbliżonej prędkości, żeby
-    połączenie jak najmniej zmieniało obraz. Powstała czastka przejmuje sumę
-    wag, a jej prędkość jest średnią ważoną obu czastek.
+    Łączymy tylko poza wiązką i tylko czastki o zbliżonej prędkości, żeby jak
+    najmniej zmieniać obraz. Z każdej czwórki robimy dwie czastki o połowie
+    łącznej wagi. Obie mają prędkość równą średniej prędkości czwórki, ale
+    rozsuniętą symetrycznie o tyle w losowym kierunku, by zachować także średnią
+    szybkość. Dzięki temu zgadza się i łączna waga, i pęd, i energia grupy.
+
+    Wcześniej łączyliśmy czastki parami, uśredniając ich prędkość. Zachowywało
+    to masę i pęd, ale gubiło energię i sztucznie studziło tło, co zaniżało
+    udział rozpędzonych elektronów. Dlatego teraz stosujemy łączenie czwórek.
     """
     if electrons.N == 0:
         return 0
-    flags, _ = flag_beam_cells(electrons, cfg)
     ci = _cell_index(electrons.ax, cfg)
+    flags, _ = flag_beam_cells(electrons, cfg)
     counts = np.bincount(ci, minlength=cfg.Nx)
+    over = (~flags) & (counts > cfg.apr_max_ppc)
+    excess = np.where(over, counts - cfg.apr_max_ppc, 0)
+    # Każda czwórka usuwa dwie czastki, stąd taki dobór liczby czwórek.
+    n_groups = np.where(over, np.minimum(excess // 2, counts // 4), 0)
+    total_groups = int(n_groups.sum())
+    if total_groups == 0:
+        return 0
+
+    # Grupujemy czastki po komórkach, a w komórce układamy je po prędkości,
+    # żeby łączyć podobne.
+    order = np.lexsort((electrons.avx, ci))
+    sc = ci[order]
+    starts = np.searchsorted(sc, np.arange(cfg.Nx), side="left")
+    rank = np.arange(sc.size) - starts[sc]
+    part = rank < 4 * n_groups[sc]
+    if not np.any(part):
+        return 0
+
+    idx = order[part]
+    # Nadajemy każdej czastce wspólny numer jej czwórki.
+    goff = np.concatenate(([0], np.cumsum(n_groups)[:-1]))
+    gid = goff[sc[part]] + (rank[part] // 4)
+    slot = rank[part] % 4
+
+    w = electrons.w[idx]
+    vx = electrons.vx[idx]; vy = electrons.vy[idx]; vz = electrons.vz[idx]
+    W = np.bincount(gid, weights=w, minlength=total_groups)
+    Px = np.bincount(gid, weights=w*vx, minlength=total_groups)
+    Py = np.bincount(gid, weights=w*vy, minlength=total_groups)
+    Pz = np.bincount(gid, weights=w*vz, minlength=total_groups)
+    Es = np.bincount(gid, weights=w*(vx*vx + vy*vy + vz*vz), minlength=total_groups)
+
+    Wsafe = np.maximum(W, 1e-300)
+    ux, uy, uz = Px/Wsafe, Py/Wsafe, Pz/Wsafe
+    d2 = np.maximum(Es/Wsafe - (ux*ux + uy*uy + uz*uz), 0.0)
+    d = np.sqrt(d2)
+    ex, ey, ez = isotropic_unit_vectors(total_groups, rng)
+
+    # Z każdej czwórki zostają dwie czastki, rozsunięte symetrycznie wokół
+    # średniej prędkości. Pozostałe dwie znikają.
+    for s, sign in ((0, +1.0), (1, -1.0)):
+        m = slot == s
+        ii = idx[m]
+        g = gid[m]
+        electrons.w[ii] = 0.5 * W[g]
+        electrons.vx[ii] = ux[g] + sign * d[g] * ex[g]
+        electrons.vy[ii] = uy[g] + sign * d[g] * ey[g]
+        electrons.vz[ii] = uz[g] + sign * d[g] * ez[g]
+    # Położenia czastek, które zostają, nie ruszamy.
 
     kill = np.zeros(electrons.N, dtype=bool)
-    n_merged = 0
-
-    over = np.nonzero((counts > cfg.apr_max_ppc) & (~flags))[0]
-    for c in over:
-        in_cell = np.nonzero(ci == c)[0]
-        n_excess = in_cell.size - cfg.apr_max_ppc
-        if n_excess <= 1:
-            continue
-
-        # Sortujemy po prędkości wzdłuż osi, żeby łączyć czastki podobne.
-        vx = electrons.vx[in_cell]
-        order = in_cell[np.argsort(vx)]
-        
-        # Łączenie kolejnych par, dopóki nie zejdziemy z nadmiarem.
-        n_pairs = n_excess
-        k = 0
-        for p in range(0, order.size - 1, 2):
-            if k >= n_pairs:
-                break
-            
-            a, b = order[p], order[p + 1]
-            wa, wb = electrons.w[a], electrons.w[b]
-            wsum = wa + wb
-
-            if wsum <= 0:
-                continue
-
-            # Prędkość ważona wagą zachowuje masę i pęd obu czastek.
-            electrons.vx[a] = (wa*electrons.vx[a] + wb*electrons.vx[b]) / wsum
-            electrons.vy[a] = (wa*electrons.vy[a] + wb*electrons.vy[b]) / wsum
-            electrons.vz[a] = (wa*electrons.vz[a] + wb*electrons.vz[b]) / wsum
-            electrons.x[a] = (wa*electrons.x[a] + wb*electrons.x[b]) / wsum
-            electrons.w[a] = wsum
-
-            kill[b] = True
-            k += 1
-            n_merged += 1
-
-    if n_merged > 0:
-        electrons.remove_mask(kill)
-    return n_merged
+    kill[idx[slot >= 2]] = True
+    electrons.remove_mask(kill)
+    return 2 * total_groups
 
 
 def run_apr(electrons, cfg, w_ref, rng):

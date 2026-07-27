@@ -46,12 +46,38 @@ class Simulation2D:
         self.E2 = np.zeros(shape)
 
         self.I_d = 0.0
+        self.I_d_avg = 0.0
         self.I_RE = 0.0
         self.n_split = self.n_merge = self.n_ionized = 0
         self.total_split = self.total_merge = self.total_ionized = 0
         self.wall_loss_w = 0.0          # łączna waga czastek utraconych na ściankach
 
+        # Bufor kołowy do uśredniania prądu wyładowania podawanego do obwodu.
+        self._Id_buf = np.zeros(cfg.I_d_avg_window)
+        self._Id_pos = 0
+        self._Id_count = 0
+
+        # Bilans energii, tak samo jak w wersji jednowymiarowej.
+        self.E_field = 0.0      # praca pola nad czastkami
+        self.E_wall = 0.0       # energia uniesiona na elektrody i ścianki
+        self.E_coll = 0.0       # zmiana energii w zderzeniach z gazem
+        self.E_cath = 0.0       # energia wniesiona przez elektrony z katody
+        self.E_apr = 0.0        # zmiana energii przy dzieleniu i łączeniu (kontrola)
+
         self._seed_plasma()
+        self.KE0 = self._kinetic_energy_J()
+
+    def _kinetic_energy_J(self):
+        """Łączna energia kinetyczna obu gatunków, w dżulach.
+
+        Wagę czastek przeliczamy na cały obwód silnika tym samym mnożnikiem,
+        którym liczymy prąd, żeby energia i prąd były w spójnej skali.
+        """
+        ke = 0.0
+        for sp in (self.electrons, self.ions):
+            if sp.N:
+                ke += 0.5 * sp.mass * np.sum(sp.aw * sp.speed2())
+        return ke * self.cfg.current_factor
 
     # Rozstawienie plazmy początkowej.
     def _seed_plasma(self):
@@ -93,14 +119,22 @@ class Simulation2D:
         rho = pusher2d.deposit_charge([self.electrons, self.ions], cfg, cached=cache)
         self.phi, self.E1, self.E2 = self.poisson.solve(rho, self.circuit.V_C)
 
+        # Energia kinetyczna przed pchnięciem, do bilansu energii.
+        ke_pre = self._kinetic_energy_J()
         e1, e2 = pusher2d.gather_field(self.electrons, self.E1, self.E2, cfg, cached=cache[0])
         pusher2d.boris_push(self.electrons, e1, e2, cfg)
         i1, i2 = pusher2d.gather_field(self.ions, self.E1, self.E2, cfg, cached=cache[1])
         pusher2d.boris_push(self.ions, i1, i2, cfg)
+        # Pchacz zmienia energię tylko przez pole elektryczne, więc różnica to praca pola.
+        ke_push = self._kinetic_energy_J()
+        self.E_field += ke_push - ke_pre
 
         qa_e, _, _, wall_e = pusher2d.apply_boundaries(self.electrons, cfg)
         qa_i, _, w_cath_i, wall_i = pusher2d.apply_boundaries(self.ions, cfg)
         self.wall_loss_w += wall_e + wall_i
+        # Energia, którą uniosły pochłonięte czastki.
+        ke_bound = self._kinetic_energy_J()
+        self.E_wall += ke_push - ke_bound
 
         # Ładunek zebrany na anodzie zamieniamy na prąd, przeskalowując liczony
         # wycinek na cały obwód silnika.
@@ -108,19 +142,33 @@ class Simulation2D:
 
         pusher2d.inject_cathode_electrons(
             self.electrons, self.w_ref, cfg.cathode_gain * w_cath_i, cfg, self.rng)
+        ke_inj = self._kinetic_energy_J()
+        self.E_cath += ke_inj - ke_bound
 
         if cfg.enable_collisions:
             self.n_ionized = self.mcc.collide_electrons(self.electrons, self.ions)
             self.mcc.collide_ions(self.ions)
             self.total_ionized += self.n_ionized
+        ke_coll = self._kinetic_energy_J()
+        self.E_coll += ke_coll - ke_inj
 
         if cfg.enable_apr and (self.step % cfg.apr_interval == 0):
             self.n_split, self.n_merge = apr2d.run_apr(
                 self.electrons, cfg, self.w_ref, self.rng)
             self.total_split += self.n_split
             self.total_merge += self.n_merge
+        # Dzielenie i łączenie powinno zachować energię, więc ten wkład ma być
+        # bliski zeru.
+        ke_apr = self._kinetic_energy_J()
+        self.E_apr += ke_apr - ke_coll
 
-        self.circuit.advance(self.I_d, cfg.dt)
+        # Prąd wyładowania podawany do obwodu uśredniamy po oknie.
+        self._Id_buf[self._Id_pos] = self.I_d
+        self._Id_pos = (self._Id_pos + 1) % self._Id_buf.size
+        self._Id_count = min(self._Id_count + 1, self._Id_buf.size)
+        self.I_d_avg = float(self._Id_buf[:self._Id_count].mean())
+
+        self.circuit.advance(self.I_d_avg, cfg.dt)
         self.I_RE = self._beam_current()
 
         self.t += cfg.dt
@@ -138,6 +186,30 @@ class Simulation2D:
         flux = np.sum(el.aw[m] * el.av1[m]) / self.cfg.L1
         return abs(E_CHARGE * self.cfg.current_factor * flux)
 
+    def energy_balance(self):
+        """Zwraca składniki bilansu energii oraz resztę zamknięcia.
+
+        Tak samo jak w wersji jednowymiarowej: zmiana energii kinetycznej
+        powinna równać się pracy pola pomniejszonej o straty i powiększonej o
+        dosył z katody, a wkład dzielenia i łączenia czastek ma być bliski zeru.
+        """
+        ke_now = self._kinetic_energy_J()
+        expected = (self.E_field - self.E_wall + self.E_cath
+                    + self.E_coll + self.E_apr)
+        residual = (ke_now - self.KE0) - expected
+        throughput = max(abs(self.E_field), 1e-30)
+        return {
+            "KE": ke_now,
+            "dKE": ke_now - self.KE0,
+            "field": self.E_field,
+            "wall": self.E_wall,
+            "coll": self.E_coll,
+            "cath": self.E_cath,
+            "apr": self.E_apr,
+            "residual": residual,
+            "residual_rel": residual / throughput,
+        }
+
     # Tekst do panelu diagnostycznego.
     def stats_text(self):
         """Składa wielowierszowy opis bieżącego stanu do pokazania w podglądzie."""
@@ -148,6 +220,7 @@ class Simulation2D:
         mean_eps = float(np.average(eps, weights=el.aw)) if el.N > 0 else 0.0
         max_eps = float(np.max(eps)) if el.N > 0 else 0.0
         wall = "n/d (periodyczny)" if cfg.x2_bc == "periodic" else f"{self.wall_loss_w:.3e}"
+        eb = self.energy_balance()
         return (
             f"geometria    : {cfg.geometry}\n"
             f"siatka       : {cfg.N1} x {cfg.N2}\n"
@@ -156,7 +229,8 @@ class Simulation2D:
             f"N_e (makro)  : {el.N}\n"
             f"N_i (makro)  : {self.ions.N}\n"
             f"---- obwód ----\n"
-            f"I_d          : {self.I_d:8.3f} A\n"
+            f"I_d (chwil.) : {self.I_d:8.3f} A\n"
+            f"I_d (uśred.) : {self.I_d_avg:8.3f} A\n"
             f"I_L          : {self.circuit.I_L:8.3f} A\n"
             f"V_C (anoda)  : {self.circuit.V_C:8.2f} V\n"
             f"---- wiązka RE ----\n"
@@ -165,6 +239,13 @@ class Simulation2D:
             f"I_RE         : {self.I_RE:8.4f} A\n"
             f"<E_e>        : {mean_eps:8.2f} eV\n"
             f"max E_e      : {max_eps:8.1f} eV\n"
+            f"---- bilans energii [J] ----\n"
+            f"zmiana E_kin : {eb['dKE']:9.3e}\n"
+            f"praca pola   : {eb['field']:9.3e}\n"
+            f"straty ścian : {eb['wall']:9.3e}\n"
+            f"zderzenia    : {eb['coll']:9.3e}\n"
+            f"reszta APR   : {eb['apr']:9.3e}\n"
+            f"reszta bil.  : {eb['residual_rel']:9.2e}\n"
             f"---- APR/MCC (skumul.) ----\n"
             f"split/merge  : {self.total_split} / {self.total_merge}\n"
             f"jonizacje    : {self.total_ionized}\n"

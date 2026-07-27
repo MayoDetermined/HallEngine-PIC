@@ -47,14 +47,21 @@ class Config2D:
     m_ion: float = M_XENON
 
     # Obwód zasilający. Nazwy pól są takie same jak w wersji jednowymiarowej,
-    # żeby dało się użyć tego samego modelu obwodu.
+    # żeby dało się użyć tego samego modelu obwodu. Tak samo jak tam prąd w
+    # gałęzi z cewką startuje od zera, a indukcyjność jest mała, więc docelowy
+    # prąd sam się ustala z równowagi, a nie jest wpisany z góry.
     V_ps: float = 400.0
     R_circ: float = 10.0
-    L_circ: float = 1.0e-4
+    L_circ: float = 1.0e-6
     C_circ: float = 1.0e-7
-    V_C_init: float = 350.0
-    I_L_init: float = 4.0
+    V_C_init: float = 300.0
+    I_L_init: float = 0.0
     circuit_substeps: int = 10
+
+    # Prąd wyładowania podawany do obwodu uśredniamy po oknie obejmującym o
+    # wiele więcej niż jeden przelot czastki, żeby obwód widział gładki
+    # przebieg, a nie pojedyncze skoki.
+    I_d_avg_window: int = 4000
 
     # Plazma początkowa.
     n0_plasma: float = 5.0e16

@@ -40,12 +40,24 @@ class Config:
     # Zewnętrzny obwód zasilający. Zasilacz podaje napięcie przez opór i cewkę,
     # a równolegle do wyładowania wisi kondensator, który wygładza przebieg.
     # Napięcie na tym kondensatorze jest zarazem napięciem anody.
+    #
+    # Indukcyjność jest celowo mała, żeby obwód zdążył zareagować w trakcie
+    # przebiegu. Prąd w gałęzi z cewką startuje od zera, więc docelowe kilka
+    # amperów nie jest wpisane z góry, tylko samo ustala się z równowagi między
+    # zasilaczem, oporem balastowym a prądem, jaki pobiera wyładowanie.
     V_ps: float = 400.0             # napięcie zasilacza; wyższe daje więcej rozpędzonych elektronów
-    R_circ: float = 10.0            # opór szeregowy, pełni rolę balastu
-    L_circ: float = 1.0e-4          # indukcyjność szeregowa
+    R_circ: float = 10.0            # opór szeregowy, pełni rolę balastu i ustala prąd roboczy
+    L_circ: float = 1.0e-6          # indukcyjność szeregowa, mała, żeby obwód nadążał za przebiegiem
     C_circ: float = 1.0e-7          # pojemność wygładzająca
-    V_C_init: float = 350.0         # od jakiego napięcia anody zaczynamy
-    I_L_init: float = 4.0           # początkowy prąd w gałęzi z cewką, blisko docelowych czterech amperów
+    V_C_init: float = 300.0         # od jakiego napięcia anody zaczynamy
+    I_L_init: float = 0.0           # prąd w gałęzi z cewką startuje od zera i sam narasta
+
+    # Prąd wyładowania odczytany z pojedynczego kroku jest bardzo poszarpany,
+    # bo każda czastka trafiająca na anodę wnosi od razu spory ładunek. Zanim
+    # podamy go do obwodu, uśredniamy go po oknie obejmującym o wiele więcej
+    # niż jeden przelot czastki przez kanał, dzięki czemu obwód widzi gładki
+    # prąd, a nie pojedyncze skoki.
+    I_d_avg_window: int = 4000      # po ilu krokach uśredniamy prąd wyładowania
 
     # Plazma, od której startujemy, oraz liczba czastek modelowych.
     n0_plasma: float = 5.0e16       # początkowa gęstość plazmy, w przybliżeniu obojętna elektrycznie

@@ -115,8 +115,13 @@ class LiveView2D:
         a = ax[1, 1]; a.clear(); a.grid(alpha=0.3)
         a.set_title("EEDF"); a.set_xlabel("energia [eV]"); a.set_ylabel("liczność (log)")
         if el.N > 0:
-            a.hist(el.kinetic_energy_eV(), bins=80, weights=el.aw, log=True,
+            eps_all = el.kinetic_energy_eV()
+            # Zakres osi ustawiamy jawnie, od zera do najwyższej energii, żeby
+            # kraniec histogramu pokrywał się z odczytem najwyższej energii.
+            e_top = max(float(eps_all.max()), cfg.E_RE_eV * 1.5)
+            a.hist(eps_all, bins=80, range=(0.0, e_top), weights=el.aw, log=True,
                    color="steelblue", alpha=0.85)
+            a.set_xlim(0.0, e_top)
             a.axvline(cfg.E_RE_eV, color="red", ls="--",
                       label=f"E_RE={cfg.E_RE_eV:.0f} eV")
             a.legend(fontsize=8)
@@ -124,7 +129,7 @@ class LiveView2D:
         # Szósty wykres: samo podsumowanie liczbowe w formie tekstu.
         a = ax[1, 2]; a.clear(); a.axis("off")
         a.text(0.02, 0.98, sim.stats_text(), va="top", ha="left",
-               family="monospace", fontsize=9, transform=a.transAxes)
+               family="monospace", fontsize=7.5, transform=a.transAxes)
 
         if cfg.headless_save_dir:
             self.fig.savefig(

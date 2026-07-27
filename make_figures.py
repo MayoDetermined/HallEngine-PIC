@@ -90,8 +90,13 @@ def fig_1d(cfg, sim, snaps, hist, ne, ni, out="fig_1d3v.png"):
     a = ax[0, 1]
     cols = plt.cm.viridis(np.linspace(0.15, 0.9, len(snaps)))
     hmax = 0.0
+    # Oś energii sięga do najwyższej energii, jaka wystąpiła w którejkolwiek
+    # migawce, żeby prawy kraniec wykresu pokrywał się z odczytem najwyższej
+    # energii w panelu obok. Wcześniej oś urywaliśmy na wysokim centylu, przez
+    # co najwyższa energia leżała daleko poza widoczną częścią wykresu.
+    e_top = max(sn["eps_all"].max() for sn in snaps) * 1.02
     for k, sn in enumerate(snaps):
-        bins = np.linspace(0, max(np.percentile(sn["eps_all"], 99.5), 80), 45)
+        bins = np.linspace(0, e_top, 70)
         h, e = np.histogram(sn["eps_all"], bins=bins, weights=sn["w_all"])
         h = h.astype(float)
         # Puste przedziały zamieniamy na wartość pustą, żeby ich nie rysować.
@@ -236,9 +241,12 @@ def fig_2d(cfg, sim, snaps, hist, ne, out):
     # Panel czwarty: rozkład energii w kilku chwilach.
     a = ax[1, 0]
     cols = plt.cm.viridis(np.linspace(0.15, 0.9, len(snaps)))
+    # Oś energii sięga do najwyższej energii z migawek, tak jak w wersji
+    # jednowymiarowej, żeby zgadzała się z odczytem najwyższej energii.
+    e_top = max(sn["eps_all"].max() for sn in snaps) * 1.02
     hmax = 0.0
     for k, sn in enumerate(snaps):
-        bins = np.linspace(0, max(np.percentile(sn["eps_all"], 99.5), 80), 60)
+        bins = np.linspace(0, e_top, 70)
         h, e = np.histogram(sn["eps_all"], bins=bins, weights=sn["w_all"])
         h = h.astype(float)
         h[h <= 0] = np.nan          # puste przedziały pomijamy, tak jak w wersji jednowymiarowej
